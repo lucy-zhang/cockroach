@@ -4252,3 +4252,52 @@ func TestCreateStatsAfterSchemaChange(t *testing.T) {
 			{"__auto__", "{x}", "0", "0", "0"},
 		})
 }
+
+func TestInsertDuringDrop(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	notifyBackfill := make(chan struct{})
+	insertDone := make(chan struct{})
+
+	params, _ := tests.CreateTestServerParams()
+	params.Knobs = base.TestingKnobs{
+		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
+			RunBeforeBackfill: func() error {
+				if notify := notifyBackfill; notify != nil {
+					notifyBackfill = nil
+					close(notify)
+					<-insertDone
+				}
+				return nil
+			},
+		},
+	}
+	s, db, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.TODO())
+	sqlDB := sqlutils.MakeSQLRunner(db)
+
+	sqlDB.Exec(t, `
+		CREATE DATABASE t;
+		CREATE TABLE t.test (k INT PRIMARY KEY, v INT CHECK (v > 0), a INT);
+	`)
+
+	notification := notifyBackfill
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := db.Exec(`ALTER TABLE t.test DROP COLUMN a`); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	<-notification
+
+	if _, err := db.Exec(`INSERT INTO t.test (k, v) VALUES (1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	close(insertDone)
+	wg.Wait()
+}
