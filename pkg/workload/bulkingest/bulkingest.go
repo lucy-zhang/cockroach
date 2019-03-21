@@ -69,7 +69,7 @@ const (
 		a INT,
 		b INT,
 		c INT,
-		payload STRING,
+		payload BYTES,
 		PRIMARY KEY (a, b, c)`
 
 	indexOnBCA = ",\n INDEX (b, c, a) STORING (payload)"
