@@ -465,9 +465,18 @@ func ResolveFK(
 		}
 	}
 
-	srcCols, err := tbl.FindActiveColumnsByNames(d.FromCols)
-	if err != nil {
-		return err
+	// FKs can be added for columns being added
+	srcCols := make([]sqlbase.ColumnDescriptor, len(d.FromCols))
+	for i := range d.FromCols {
+		c, dropped, err := tbl.FindColumnByName(d.FromCols[i])
+		if err != nil {
+			return err
+		}
+		// TODO (lucy): error string
+		if dropped {
+			return errors.Errorf("column %s does not exist", d.FromCols[i])
+		}
+		srcCols[i] = *c
 	}
 
 	targetColNames := d.ToCols
@@ -569,50 +578,58 @@ func ResolveFK(
 	}
 
 	if ts != NewTable {
-		ref.Validity = sqlbase.ConstraintValidity_Unvalidated
+		ref.Validity = sqlbase.ConstraintValidity_Validating
 	}
 	backref := sqlbase.ForeignKeyReference{Table: tbl.ID}
-
-	if matchesIndex(srcCols, tbl.PrimaryIndex, matchPrefix) {
-		if tbl.PrimaryIndex.ForeignKey.IsSet() {
-			return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
-				"columns cannot be used by multiple foreign key constraints")
-		}
-		tbl.PrimaryIndex.ForeignKey = ref
-		backref.Index = tbl.PrimaryIndex.ID
-	} else {
-		found := false
-		for i := range tbl.Indexes {
-			if matchesIndex(srcCols, tbl.Indexes[i], matchPrefix) {
-				if tbl.Indexes[i].ForeignKey.IsSet() {
-					return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
-						"columns cannot be used by multiple foreign key constraints")
-				}
-				tbl.Indexes[i].ForeignKey = ref
-				backref.Index = tbl.Indexes[i].ID
-				found = true
-				break
-			}
-		}
-		if !found {
-			// Avoid unexpected index builds from ALTER TABLE ADD CONSTRAINT.
-			if ts == NonEmptyTable {
+	found := false
+	for _, idx := range tbl.AllNonDropIndexes() {
+		if matchesIndex(srcCols, *idx, matchPrefix) {
+			if idx.ForeignKey.IsSet() {
 				return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
-					"foreign key requires an existing index on columns %s", colNames(srcCols))
+					"columns cannot be used by multiple foreign key constraints")
 			}
-			added, err := addIndexForFK(tbl, srcCols, constraintName, ref, ts)
-			if err != nil {
-				return err
+			for _, m := range tbl.Mutations {
+				if c := m.GetConstraint(); c != nil && c.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY {
+					if idx.ID == c.ForeignKeyIndex {
+						return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
+							"columns cannot be used by multiple foreign key constraints")
+					}
+				}
 			}
-			backref.Index = added
+			// TODO (lucy): this assumes that new tables don't have any index mutations; confirm this and comment
+			if ts == NewTable {
+				idx.ForeignKey = ref
+			} else {
+				tbl.AddForeignKeyValidationMutation(&ref, idx.ID)
+			}
+			backref.Index = idx.ID
+			found = true
+			break
 		}
 	}
-	if targetIdxIndex > -1 {
-		target.Indexes[targetIdxIndex].ReferencedBy = append(target.Indexes[targetIdxIndex].ReferencedBy, backref)
-	} else {
-		target.PrimaryIndex.ReferencedBy = append(target.PrimaryIndex.ReferencedBy, backref)
+
+	if !found {
+		// Avoid unexpected index builds from ALTER TABLE ADD CONSTRAINT.
+		if ts == NonEmptyTable {
+			return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
+				"foreign key requires an existing index on columns %s", colNames(srcCols))
+		}
+		added, err := addIndexForFK(tbl, srcCols, constraintName, ref, ts)
+		if err != nil {
+			return err
+		}
+		backref.Index = added
 	}
 
+	if ts == NewTable {
+		if targetIdxIndex > -1 {
+			target.Indexes[targetIdxIndex].ReferencedBy = append(target.Indexes[targetIdxIndex].ReferencedBy, backref)
+		} else {
+			target.PrimaryIndex.ReferencedBy = append(target.PrimaryIndex.ReferencedBy, backref)
+		}
+	}
+
+	// TODO (lucy): also check mutations
 	// Multiple FKs from the same column would potentially result in ambiguous or
 	// unexpected behavior with conflicting CASCADE/RESTRICT/etc behaviors.
 	colsInFKs := make(map[sqlbase.ColumnID]struct{})
@@ -621,6 +638,25 @@ func ResolveFK(
 			numCols := len(idx.ColumnIDs)
 			if idx.ForeignKey.SharedPrefixLen > 0 {
 				numCols = int(idx.ForeignKey.SharedPrefixLen)
+			}
+			for i := 0; i < numCols; i++ {
+				if _, ok := colsInFKs[idx.ColumnIDs[i]]; ok {
+					return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
+						"column %q cannot be used by multiple foreign key constraints", idx.ColumnNames[i])
+				}
+				colsInFKs[idx.ColumnIDs[i]] = struct{}{}
+			}
+		}
+	}
+	for _, m := range tbl.Mutations {
+		if constraint := m.GetConstraint(); constraint != nil && constraint.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY {
+			idx, err := tbl.FindIndexByID(constraint.ForeignKeyIndex)
+			if err != nil {
+				return err
+			}
+			numCols := len(idx.ColumnIDs)
+			if constraint.ForeignKey.SharedPrefixLen > 0 {
+				numCols = int(constraint.ForeignKey.SharedPrefixLen)
 			}
 			for i := 0; i < numCols; i++ {
 				if _, ok := colsInFKs[idx.ColumnIDs[i]]; ok {
@@ -649,7 +685,6 @@ func addIndexForFK(
 		Name:             fmt.Sprintf("%s_auto_index_%s", tbl.Name, constraintName),
 		ColumnNames:      make([]string, len(srcCols)),
 		ColumnDirections: make([]sqlbase.IndexDescriptor_Direction, len(srcCols)),
-		ForeignKey:       ref,
 	}
 	for i, c := range srcCols {
 		idx.ColumnDirections[i] = sqlbase.IndexDescriptor_ASC
@@ -657,6 +692,7 @@ func addIndexForFK(
 	}
 
 	if ts == NewTable {
+		idx.ForeignKey = ref
 		if err := tbl.AddIndex(idx, false); err != nil {
 			return 0, err
 		}
@@ -680,7 +716,9 @@ func addIndexForFK(
 	if err := tbl.AllocateIDs(); err != nil {
 		return 0, err
 	}
-	return tbl.Mutations[len(tbl.Mutations)-1].GetIndex().ID, nil
+	id := tbl.Mutations[len(tbl.Mutations)-1].GetIndex().ID
+	tbl.AddForeignKeyValidationMutation(&ref, id)
+	return id, nil
 }
 
 // colNames converts a []colDesc to a human-readable string for use in error messages.

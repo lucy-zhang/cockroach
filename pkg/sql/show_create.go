@@ -53,6 +53,7 @@ func printForeignKeyConstraint(
 	idx *sqlbase.IndexDescriptor,
 	lCtx *internalLookupCtx,
 ) error {
+	// TODO (lucy): account for mutations?
 	fk := &idx.ForeignKey
 	if !fk.IsSet() {
 		return nil
@@ -82,6 +83,7 @@ func printForeignKeyConstraint(
 		fkTableName.ExplicitSchema = false
 	}
 	buf.WriteString("FOREIGN KEY (")
+	// TODO (lucy): account for mutations?
 	formatQuoteNames(buf, idx.ColumnNames[0:idx.ForeignKey.SharedPrefixLen]...)
 	buf.WriteString(") REFERENCES ")
 	fmtCtx := tree.NewFmtCtx(tree.FmtSimple)
@@ -172,6 +174,7 @@ func ShowCreateTable(
 	allIdx := append(desc.Indexes, desc.PrimaryIndex)
 	for i := range allIdx {
 		idx := &allIdx[i]
+		// TODO (lucy): account for mutations?
 		if fk := &idx.ForeignKey; fk.IsSet() && !ignoreFKs {
 			f.WriteString(",\n\tCONSTRAINT ")
 			f.FormatNameP(&fk.Name)

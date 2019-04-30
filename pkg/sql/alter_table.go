@@ -227,13 +227,9 @@ func (n *alterTableNode) startExec(params runParams) error {
 
 			case *tree.ForeignKeyConstraintTableDef:
 				for _, colName := range d.FromCols {
-					col, err := n.tableDesc.FindActiveColumnByName(string(colName))
-					if err != nil {
-						if _, dropped, inactiveErr := n.tableDesc.FindColumnByName(colName); inactiveErr == nil && !dropped {
-							return pgerror.UnimplementedWithIssue(32917,
-								"adding a REFERENCES constraint while the column is being added not supported")
-						}
-						return err
+					col, dropped, err := n.tableDesc.FindColumnByName(colName)
+					if err != nil || dropped {
+						return fmt.Errorf("column %q not found", colName)
 					}
 
 					if err := col.CheckCanBeFKRef(); err != nil {
@@ -523,14 +519,14 @@ func (n *alterTableNode) startExec(params runParams) error {
 					}
 				}
 				if !found {
-					return pgerror.AssertionFailedf(
-						"constraint returned by GetConstraintInfo not found")
+					return pgerror.Newf(pgerror.CodeObjectNotInPrerequisiteStateError,
+						"constraint %q in the middle of being added, try again later", t.Constraint)
 				}
 				idx, err := n.tableDesc.FindIndexByID(id)
 				if err != nil {
 					return pgerror.NewAssertionErrorWithWrappedErrf(err, "")
 				}
-				if err := params.p.validateForeignKey(params.ctx, n.tableDesc.TableDesc(), idx); err != nil {
+				if err := validateForeignKey(params.ctx, n.tableDesc.TableDesc(), idx, params.EvalContext().InternalExecutor, params.EvalContext().Txn); err != nil {
 					return err
 				}
 				idx.ForeignKey.Validity = sqlbase.ConstraintValidity_Validated

@@ -17,7 +17,6 @@ package sqlbase
 import (
 	"context"
 	"fmt"
-
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -309,6 +308,7 @@ func (desc *TableDescriptor) CheckUniqueConstraints() error {
 func (desc *TableDescriptor) collectConstraintInfo(
 	tableLookup tableLookupFn,
 ) (map[string]ConstraintDetail, error) {
+	log.Warningf(context.TODO(), "descriptor: %+v", desc)
 	info := make(map[string]ConstraintDetail)
 
 	// Indexes provide PK, Unique and FK constraints.
@@ -351,41 +351,46 @@ func (desc *TableDescriptor) collectConstraintInfo(
 			detail.Index = index
 			info[index.Name] = detail
 		}
+	}
 
-		if index.ForeignKey.IsSet() {
-			if _, ok := info[index.ForeignKey.Name]; ok {
-				return nil, pgerror.Newf(pgerror.CodeDuplicateObjectError,
-					"duplicate constraint name: %q", index.ForeignKey.Name)
-			}
-			detail := ConstraintDetail{Kind: ConstraintTypeFK}
-			detail.Unvalidated = index.ForeignKey.Validity == ConstraintValidity_Unvalidated
-			numCols := len(index.ColumnIDs)
-			if index.ForeignKey.SharedPrefixLen > 0 {
-				numCols = int(index.ForeignKey.SharedPrefixLen)
-			}
-			detail.Columns = index.ColumnNames[:numCols]
-			detail.Index = index
-			detail.FK = &index.ForeignKey
-
-			if tableLookup != nil {
-				other, err := tableLookup(index.ForeignKey.Table)
-				if err != nil {
-					return nil, pgerror.NewAssertionErrorWithWrappedErrf(err,
-						"error resolving table %d referenced in foreign key",
-						log.Safe(index.ForeignKey.Table))
-				}
-				otherIdx, err := other.FindIndexByID(index.ForeignKey.Index)
-				if err != nil {
-					return nil, pgerror.NewAssertionErrorWithWrappedErrf(err,
-						"error resolving index %d in table %s referenced in foreign key",
-						log.Safe(index.ForeignKey.Index), other.Name)
-				}
-				detail.Details = fmt.Sprintf("%s.%v", other.Name, otherIdx.ColumnNames)
-				detail.ReferencedTable = other
-				detail.ReferencedIndex = otherIdx
-			}
-			info[index.ForeignKey.Name] = detail
+	for id, fk := range desc.AllActiveAndInactiveForeignKeys() {
+		idx, err := desc.FindIndexByID(id)
+		if err != nil {
+			return nil, err
 		}
+		if _, ok := info[fk.Name]; ok {
+			return nil, pgerror.Newf(pgerror.CodeDuplicateObjectError,
+				"duplicate constraint name: %q", fk.Name)
+		}
+		detail := ConstraintDetail{Kind: ConstraintTypeFK}
+		// Constraints in the Validating state are considered Unvalidated for this purpose
+		detail.Unvalidated = fk.Validity != ConstraintValidity_Validated
+		numCols := len(idx.ColumnIDs)
+		if fk.SharedPrefixLen > 0 {
+			numCols = int(fk.SharedPrefixLen)
+		}
+		detail.Columns = idx.ColumnNames[:numCols]
+		detail.Index = idx
+		detail.FK = fk
+
+		if tableLookup != nil {
+			other, err := tableLookup(fk.Table)
+			if err != nil {
+				return nil, pgerror.NewAssertionErrorWithWrappedErrf(err,
+					"error resolving table %d referenced in foreign key",
+					log.Safe(fk.Table))
+			}
+			otherIdx, err := other.FindIndexByID(fk.Index)
+			if err != nil {
+				return nil, pgerror.NewAssertionErrorWithWrappedErrf(err,
+					"error resolving index %d in table %s referenced in foreign key",
+					log.Safe(fk.Index), other.Name)
+			}
+			detail.Details = fmt.Sprintf("%s.%v", other.Name, otherIdx.ColumnNames)
+			detail.ReferencedTable = other
+			detail.ReferencedIndex = otherIdx
+		}
+		info[fk.Name] = detail
 	}
 
 	for _, c := range desc.AllActiveAndInactiveChecks() {

@@ -342,6 +342,7 @@ func reassignReferencedTables(
 				}
 			}
 
+			// TODO (lucy): account for mutations?
 			if index.ForeignKey.IsSet() {
 				if to := index.ForeignKey.Table; to == oldID {
 					index.ForeignKey.Table = newID
