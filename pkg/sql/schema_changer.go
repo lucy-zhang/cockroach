@@ -567,12 +567,9 @@ func (sc *SchemaChanger) maybeMakeAddTablePublic(
 	ctx context.Context, table *sqlbase.TableDescriptor,
 ) error {
 	if table.Adding() {
-		fks, err := table.AllActiveAndInactiveForeignKeys()
-		if err != nil {
-			return err
-		}
+		fks := table.AllActiveAndInactiveForeignKeys()
 		for _, fk := range fks {
-			if err := sc.waitToUpdateLeases(ctx, fk.Table); err != nil {
+			if err := sc.waitToUpdateLeases(ctx, fk.ReferencedTableID); err != nil {
 				return err
 			}
 		}
@@ -1261,7 +1258,7 @@ func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError erro
 				// Get the foreign key backreferences to remove, and remove them immediately if they're on the same table
 				if constraint.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY {
 					fk := &constraint.ForeignKey
-					if fk.Table == desc.ID {
+					if fk.ReferencedTableID == desc.ID {
 						if err := removeFKBackReferenceFromTable(desc, fk.Index, desc.ID, constraint.ForeignKeyIndex); err != nil {
 							return err
 						}

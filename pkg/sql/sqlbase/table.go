@@ -264,9 +264,11 @@ type ConstraintDetail struct {
 	Index *IndexDescriptor
 
 	// Only populated for FK Constraints.
-	FK              *ForeignKeyReference
+	NewFK           *ForeignKeyConstraint
 	ReferencedTable *TableDescriptor
-	ReferencedIndex *IndexDescriptor
+	// These are deprecated below here
+	// FK              *ForeignKeyReference
+	// ReferencedIndex *IndexDescriptor
 
 	// Only populated for Check Constraints.
 	CheckConstraint *TableDescriptor_CheckConstraint
@@ -351,12 +353,9 @@ func (desc *TableDescriptor) collectConstraintInfo(
 		}
 	}
 
-	fks, err := desc.AllActiveAndInactiveForeignKeys()
-	if err != nil {
-		return nil, err
-	}
-	for id, fk := range fks {
-		idx, err := desc.FindIndexByID(id)
+	fks := desc.AllActiveAndInactiveForeignKeys()
+	for fk := range fks {
+		idx := f
 		if err != nil {
 			return nil, err
 		}

@@ -30,23 +30,24 @@ enum ConstraintValidity {
   Validating = 2;
 }
 
-message ForeignKeyReference {
-  enum Action {
-    option (gogoproto.goproto_enum_stringer) = false;
-    NO_ACTION = 0;
-    RESTRICT = 1;
-    SET_NULL = 2;
-    SET_DEFAULT = 3;
-    CASCADE = 4;
-  }
+enum ForeignKeyReference_Action {
+  option (gogoproto.goproto_enum_stringer) = false;
+  NO_ACTION = 0;
+  RESTRICT = 1;
+  SET_NULL = 2;
+  SET_DEFAULT = 3;
+  CASCADE = 4;
+}
 
-  // Match is the algorithm used to compare composite keys.
-  enum Match {
-    option (gogoproto.goproto_enum_stringer) = false;
-    SIMPLE = 0;
-    FULL = 1;
-    PARTIAL = 2; // Note: not actually supported, but we reserve the value for future use.
-  }
+// Match is the algorithm used to compare composite keys.
+enum ForeignKeyReference_Match {
+  option (gogoproto.goproto_enum_stringer) = false;
+  SIMPLE = 0;
+  FULL = 1;
+  PARTIAL = 2; // Note: not actually supported, but we reserve the value for future use.
+}
+
+message ForeignKeyReference {
 
   optional uint32 table = 1 [(gogoproto.nullable) = false, (gogoproto.casttype) = "ID"];
   optional uint32 index = 2 [(gogoproto.nullable) = false, (gogoproto.casttype) = "IndexID"];
@@ -55,47 +56,38 @@ message ForeignKeyReference {
   // If this FK only uses a prefix of the columns in its index, we record how
   // many to avoid spuriously counting the additional cols as used by this FK.
   optional int32 shared_prefix_len = 5 [(gogoproto.nullable) = false];
-  optional Action on_delete = 6 [(gogoproto.nullable) = false];
-  optional Action on_update = 7 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference_Action on_delete = 6 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference_Action on_update = 7 [(gogoproto.nullable) = false];
   // This is only important for composite keys. For all prior matches before
   // the addition of this value, MATCH SIMPLE will be used.
-  optional Match match = 8 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference_Match match = 8 [(gogoproto.nullable) = false];
 }
 
 message ForeignKeyConstraint {
-  enum Action {
-    option (gogoproto.goproto_enum_stringer) = false;
-    NO_ACTION = 0;
-    RESTRICT = 1;
-    SET_NULL = 2;
-    SET_DEFAULT = 3;
-    CASCADE = 4;
-  }
-
-  // Match is the algorithm used to compare composite keys.
-  enum Match {
-    option (gogoproto.goproto_enum_stringer) = false;
-    SIMPLE = 0;
-    FULL = 1;
-    PARTIAL = 2; // Note: not actually supported, but we reserve the value for future use.
-  }
-
-  optional uint32 target_table = 1 [(gogoproto.nullable) = false, (gogoproto.casttype) = "ID"];
-  repeated uint32 source_column_ids = 2 [(gogoproto.customname) = "SourceColumnIDs", (gogoproto.casttype) = "ColumnID"];
-  repeated uint32 target_column_ids = 3 [(gogoproto.customname) = "TargetColumnIDs", (gogoproto.casttype) = "ColumnID"];
+  optional uint32 referenced_table_id = 1 [(gogoproto.nullable) = false,
+                                          (gogoproto.customname) = "ReferencedTableID",
+                                          (gogoproto.casttype) = "ID"];
+  repeated uint32 origin_column_ids = 2 [(gogoproto.customname) = "OriginColumnIDs",
+                                        (gogoproto.casttype) = "ColumnID"];
+  repeated uint32 referenced_column_ids = 3 [(gogoproto.customname) = "ReferencedColumnIDs",
+                                            (gogoproto.casttype) = "ColumnID"];
   optional string name = 4 [(gogoproto.nullable) = false];
   optional ConstraintValidity validity = 5 [(gogoproto.nullable) = false];
-  optional Action on_delete = 6 [(gogoproto.nullable) = false];
-  optional Action on_update = 7 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference_Action on_delete = 6 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference_Action on_update = 7 [(gogoproto.nullable) = false];
   // This is only important for composite keys. For all prior matches before
   // the addition of this value, MATCH SIMPLE will be used.
-  optional Match match = 8 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference_Match match = 8 [(gogoproto.nullable) = false];
 }
 
 message ForeignKeyBackreference {
-  optional uint32 source_table = 1 [(gogoproto.nullable) = false, (gogoproto.casttype) = "ID"];
-  repeated uint32 source_column_ids = 2 [(gogoproto.customname) = "SourceColumnIDs", (gogoproto.casttype) = "ColumnID"];
-  repeated uint32 target_column_ids = 3 [(gogoproto.customname) = "TargetColumnIDs", (gogoproto.casttype) = "ColumnID"];
+  optional uint32 origin_table_id = 1 [(gogoproto.nullable) = false,
+                                      (gogoproto.customname) = "OriginTableID",
+                                      (gogoproto.casttype) = "ID"];
+  repeated uint32 origin_column_ids = 2 [(gogoproto.customname) = "OriginColumnIDs",
+                                        (gogoproto.casttype) = "ColumnID"];
+  repeated uint32 referenced_column_ids = 3 [(gogoproto.customname) = "ReferencedColumnIDs",
+                                            (gogoproto.casttype) = "ColumnID"];
 }
 
 message ColumnDescriptor {
@@ -349,6 +341,7 @@ message IndexDescriptor {
 
   // InterleavedBy contains a reference to every table/index that is interleaved
   // into this one.
+  // !!! we should probably deal with this somehow before merging this PR.
   repeated ForeignKeyReference interleaved_by = 12  [(gogoproto.nullable) = false];
 
   // Partitioning, if it's not the zero value, describes how this index's data
@@ -380,8 +373,8 @@ message ConstraintToUpdate {
   required ConstraintType constraint_type = 1 [(gogoproto.nullable) = false];
   required string name = 2 [(gogoproto.nullable) = false];
   optional TableDescriptor.CheckConstraint check = 3 [(gogoproto.nullable) = false];
-  optional ForeignKeyReference foreign_key = 4 [(gogoproto.nullable) = false];
-  optional uint32 foreign_key_index = 5 [(gogoproto.nullable) = false, (gogoproto.casttype) = "IndexID"];
+  // All fields past 3 haven't been persisted before 19.2.
+  optional ForeignKeyConstraint foreign_key = 4 [(gogoproto.nullable) = false];
 }
 
 // A DescriptorMutation represents a column or an index that
@@ -769,8 +762,12 @@ message TableDescriptor {
   repeated GCDescriptorMutation gc_mutations = 33 [(gogoproto.nullable) = false,
                                                   (gogoproto.customname) = "GCMutations"];
 
-  repeated ForeignKeyConstraint out_fks = 34 [(gogoproto.customname) = "OutFKs"];
-  repeated ForeignKeyConstraint in_fks = 35 [(gogoproto.customname) = "InFKs"];
+  // outbound_fks contains all foreign key constraints that have this table as
+  // the origin table.
+  repeated ForeignKeyConstraint outbound_fks = 34 [(gogoproto.customname) = "OutboundFKs"];
+  // inbound_fks contains all foreign key constraints that have this table as
+  // the referenced table.
+  repeated ForeignKeyBackreference inbound_fks = 35 [(gogoproto.customname) = "InboundFKs"];
 }
 
 // DatabaseDescriptor represents a namespace (aka database) and is stored

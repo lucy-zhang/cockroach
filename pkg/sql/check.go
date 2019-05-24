@@ -173,33 +173,31 @@ func nonMatchingRowQuery(
 	}
 	return fmt.Sprintf(
 		`SELECT %[1]s FROM 
-		  (SELECT %[2]s FROM [%[3]d AS src]@{FORCE_INDEX=[%[4]d],IGNORE_FOREIGN_KEYS} WHERE %[5]s) AS s
+		  (SELECT %[2]s FROM [%[3]d AS src]@{IGNORE_FOREIGN_KEYS} WHERE %[4]s) AS s
 			LEFT OUTER JOIN
-			(SELECT * FROM [%[6]d AS target]@[%[7]d]) AS t
-			ON %[8]s
-		 WHERE %[9]s IS NULL %[10]s`,
+			(SELECT * FROM [%[5]d AS target] AS t
+			ON %[6]s
+		 WHERE %[7]s IS NULL %[8]s`,
 		strings.Join(qualifiedSrcCols, ", "), // 1
 		strings.Join(srcCols, ", "),          // 2
 		srcTbl.ID,                            // 3
-		srcIdx.ID,                            // 4
-		strings.Join(srcWhere, " AND "),      // 5
-		targetID,                             // 6
-		targetIdx.ID,                         // 7
-		strings.Join(on, " AND "),            // 8
+		strings.Join(srcWhere, " AND "),      // 4
+		targetID,                             // 5
+		strings.Join(on, " AND "),            // 6
 		// Sufficient to check the first column to see whether there was no matching row
-		targetCols[0], // 9
-		limit,         // 10
+		targetCols[0], // 7
+		limit,         // 8
 	), colNames, nil
 }
 
 func validateForeignKey(
 	ctx context.Context,
 	srcTable *sqlbase.TableDescriptor,
-	srcIdx *sqlbase.IndexDescriptor,
+	fk *sqlbase.ForeignKeyConstraint,
 	ie tree.SessionBoundInternalExecutor,
 	txn *client.Txn,
 ) error {
-	targetTable, err := sqlbase.GetTableDescFromID(ctx, txn, srcIdx.ForeignKey.Table)
+	targetTable, err := sqlbase.GetTableDescFromID(ctx, txn, fk.ReferencedTableID)
 	if err != nil {
 		return err
 	}

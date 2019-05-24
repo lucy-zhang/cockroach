@@ -472,8 +472,8 @@ func (n *alterTableNode) startExec(params runParams) error {
 			}
 			if err := n.tableDesc.DropConstraint(
 				name, details,
-				func(desc *sqlbase.MutableTableDescriptor, idx *sqlbase.IndexDescriptor) error {
-					return params.p.removeFKBackReference(params.ctx, desc, idx)
+				func(desc *sqlbase.MutableTableDescriptor, ref *sqlbase.ForeignKeyConstraint) error {
+					return params.p.removeFKBackReference(params.ctx, desc, ref)
 				}); err != nil {
 				return err
 			}
@@ -517,18 +517,15 @@ func (n *alterTableNode) startExec(params runParams) error {
 				ck.Validity = sqlbase.ConstraintValidity_Validated
 
 			case sqlbase.ConstraintTypeFK:
-				found := false
-				var fkIdx *sqlbase.IndexDescriptor
-				for _, idx := range n.tableDesc.AllNonDropIndexes() {
-					fk := &idx.ForeignKey
+				var foundFk *sqlbase.ForeignKeyConstraint
+				for _, fk := range n.tableDesc.OutboundFKs {
 					// If the constraint is still being validated, don't allow VALIDATE CONSTRAINT to run
-					if fk.IsSet() && fk.Name == name && fk.Validity != sqlbase.ConstraintValidity_Validating {
-						found = true
-						fkIdx = idx
+					if fk.Name == name && fk.Validity != sqlbase.ConstraintValidity_Validating {
+						foundFk = fk
 						break
 					}
 				}
-				if !found {
+				if foundFk == nil {
 					return pgerror.Newf(pgerror.CodeObjectNotInPrerequisiteStateError,
 						"constraint %q in the middle of being added, try again later", t.Constraint)
 				}
@@ -537,7 +534,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				); err != nil {
 					return err
 				}
-				fkIdx.ForeignKey.Validity = sqlbase.ConstraintValidity_Validated
+				foundFk.Validity = sqlbase.ConstraintValidity_Validated
 
 			default:
 				return pgerror.Newf(pgerror.CodeWrongObjectTypeError,

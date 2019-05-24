@@ -72,6 +72,41 @@ func (c ColumnIDs) Len() int           { return len(c) }
 func (c ColumnIDs) Swap(i, j int)      { c[i], c[j] = c[j], c[i] }
 func (c ColumnIDs) Less(i, j int) bool { return c[i] < c[j] }
 
+// Equal returns true if this column ids slice is identical to the other column
+// ids slice.
+func (c ColumnIDs) Equal(other ColumnIDs) bool {
+	if len(c) != len(other) {
+		return false
+	}
+
+	for i := range c {
+		if c[i] != other[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// EqualSets returns true if this column ids slice contains all of the same ids
+// as the other column ids slice, order agnostic.
+func (c ColumnIDs) EqualSets(other ColumnIDs) bool {
+	if len(c) != len(other) {
+		return false
+	}
+	thisCopy := make(ColumnIDs, len(c))
+	otherCopy := make(ColumnIDs, len(other))
+	copy(thisCopy, c)
+	copy(otherCopy, other)
+	sort.Sort(thisCopy)
+	sort.Sort(otherCopy)
+	for i := range thisCopy {
+		if c[i] != otherCopy[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // FamilyID is a custom type for ColumnFamilyDescriptor IDs.
 type FamilyID uint32
 
@@ -592,8 +627,12 @@ func (desc *TableDescriptor) AllActiveAndInactiveChecks() []*TableDescriptor_Che
 	// including it twice. (Note that even though unvalidated check constraints
 	// cannot be added as of 19.1, they can still exist if they were created under
 	// previous versions.)
-	checks := make([]*TableDescriptor_CheckConstraint, 0, len(desc.Checks)+len(desc.Mutations))
+	checks := make([]*TableDescriptor_CheckConstraint, 0, len(desc.Checks))
 	for _, c := range desc.Checks {
+		// While a check constraint is being validated for existing rows, the
+		// check constraint is present both on the table descriptor and in the
+		// mutations list in the Validating state, so those constraints are excluded
+		// here to avoid double-counting.
 		if c.Validity != ConstraintValidity_Validating {
 			checks = append(checks, c)
 		}
@@ -611,34 +650,23 @@ func (desc *TableDescriptor) AllActiveAndInactiveChecks() []*TableDescriptor_Che
 // writes, and "inactive" ones queued in the mutations list. An error is
 // returned if multiple foreign keys (including mutations) are found for the
 // same index.
-func (desc *TableDescriptor) AllActiveAndInactiveForeignKeys() (
-	map[IndexID]*ForeignKeyReference,
-	error,
-) {
-	fks := make(map[IndexID]*ForeignKeyReference)
-	// While a foreign key constraint is being validated for existing rows, the
-	// foreign key reference is present both on the index descriptor and in the
-	// mutations list in the Validating state, so those FKs are excluded here to
-	// avoid double-counting.
-	if desc.PrimaryIndex.ForeignKey.IsSet() && desc.PrimaryIndex.ForeignKey.Validity != ConstraintValidity_Validating {
-		fks[desc.PrimaryIndex.ID] = &desc.PrimaryIndex.ForeignKey
-	}
-	for i := range desc.Indexes {
-		idx := &desc.Indexes[i]
-		if idx.ForeignKey.IsSet() && idx.ForeignKey.Validity != ConstraintValidity_Validating {
-			fks[idx.ID] = &idx.ForeignKey
+func (desc *TableDescriptor) AllActiveAndInactiveForeignKeys() []*ForeignKeyConstraint {
+	fks := make([]*ForeignKeyConstraint, 0, len(desc.OutboundFKs))
+	for _, fk := range desc.OutboundFKs {
+		// While a foreign key constraint is being validated for existing rows, the
+		// foreign key reference is present both on the table descriptor and in the
+		// mutations list in the Validating state, so those FKs are excluded here to
+		// avoid double-counting.
+		if fk.Validity != ConstraintValidity_Validating {
+			fks = append(fks, fk)
 		}
 	}
-	for i := range desc.Mutations {
-		if c := desc.Mutations[i].GetConstraint(); c != nil && c.ConstraintType == ConstraintToUpdate_FOREIGN_KEY {
-			if _, ok := fks[c.ForeignKeyIndex]; ok {
-				return nil, pgerror.AssertionFailedf(
-					"foreign key mutation found for index that already has a foreign key")
-			}
-			fks[c.ForeignKeyIndex] = &c.ForeignKey
+	for _, m := range desc.Mutations {
+		if c := m.GetConstraint(); c != nil && c.ConstraintType == ConstraintToUpdate_FOREIGN_KEY {
+			fks = append(fks, &c.ForeignKey)
 		}
 	}
-	return fks, nil
+	return fks
 }
 
 // ForeachNonDropIndex runs a function on all indexes, including those being
@@ -2207,7 +2235,7 @@ func (desc *MutableTableDescriptor) RenameIndexDescriptor(
 func (desc *MutableTableDescriptor) DropConstraint(
 	name string,
 	detail ConstraintDetail,
-	removeFK func(*MutableTableDescriptor, *IndexDescriptor) error,
+	removeFK func(*MutableTableDescriptor, *ForeignKeyConstraint) error,
 ) error {
 	switch detail.Kind {
 	case ConstraintTypePK:
@@ -2233,14 +2261,21 @@ func (desc *MutableTableDescriptor) DropConstraint(
 		return nil
 
 	case ConstraintTypeFK:
-		idx, err := desc.FindIndexByID(detail.Index.ID)
-		if err != nil {
+		if err := removeFK(desc, detail.NewFK); err != nil {
 			return err
 		}
-		if err := removeFK(desc, idx); err != nil {
-			return err
+		// Search through the descriptor's foreign key constraints and delete the
+		// one that we're supposed to be deleting.
+		foundIdx := -1
+		for i, ref := range desc.OutboundFKs {
+			if ref.Name == name {
+				foundIdx = i
+			}
 		}
-		idx.ForeignKey = ForeignKeyReference{}
+		if foundIdx == -1 {
+			return pgerror.AssertionFailedf("constraint %q not found on table %q", name, desc.Name)
+		}
+		desc.OutboundFKs = append(desc.OutboundFKs[:foundIdx], desc.OutboundFKs[foundIdx+1:]...)
 		return nil
 
 	default:
@@ -2265,10 +2300,10 @@ func (desc *MutableTableDescriptor) RenameConstraint(
 		return desc.RenameIndexDescriptor(detail.Index, newName)
 
 	case ConstraintTypeFK:
-		if detail.FK.Validity == ConstraintValidity_Validating {
+		if detail.NewFK.Validity == ConstraintValidity_Validating {
 			return pgerror.Unimplementedf("rename-constraint-fk-mutation",
 				"constraint %q in the middle of being added, try again later",
-				tree.ErrNameStringP(&detail.FK.Name))
+				tree.ErrNameStringP(&detail.NewFK.Name))
 		}
 		idx, err := desc.FindIndexByID(detail.Index.ID)
 		if err != nil {
@@ -2392,11 +2427,12 @@ func (desc *MutableTableDescriptor) MakeMutationComplete(m DescriptorMutation) e
 					}
 				}
 			case ConstraintToUpdate_FOREIGN_KEY:
-				idx, err := desc.FindIndexByID(t.Constraint.ForeignKeyIndex)
-				if err != nil {
-					return err
+				for i := range desc.OutboundFKs {
+					if desc.OutboundFKs[i].Name == t.Constraint.Name {
+						desc.OutboundFKs[i].Validity = ConstraintValidity_Validated
+						break
+					}
 				}
-				idx.ForeignKey.Validity = ConstraintValidity_Validated
 			default:
 				return errors.Errorf("unsupported constraint type: %d", t.Constraint.ConstraintType)
 			}
@@ -2429,16 +2465,13 @@ func (desc *MutableTableDescriptor) AddCheckValidationMutation(
 }
 
 // AddForeignKeyValidationMutation adds a foreign key constraint validation mutation to desc.Mutations.
-func (desc *MutableTableDescriptor) AddForeignKeyValidationMutation(
-	fk *ForeignKeyReference, idx IndexID,
-) {
+func (desc *MutableTableDescriptor) AddForeignKeyValidationMutation(fk *ForeignKeyConstraint) {
 	m := DescriptorMutation{
 		Descriptor_: &DescriptorMutation_Constraint{
 			Constraint: &ConstraintToUpdate{
-				ConstraintType:  ConstraintToUpdate_FOREIGN_KEY,
-				Name:            fk.Name,
-				ForeignKey:      *fk,
-				ForeignKeyIndex: idx,
+				ConstraintType: ConstraintToUpdate_FOREIGN_KEY,
+				Name:           fk.Name,
+				ForeignKey:     *fk,
 			},
 		},
 		Direction: DescriptorMutation_ADD,
@@ -2826,28 +2859,28 @@ func (cc *TableDescriptor_CheckConstraint) UsesColumn(
 // CompositeKeyMatchMethodValue allows the conversion from a
 // tree.ReferenceCompositeKeyMatchMethod to a ForeignKeyReference_Match.
 var CompositeKeyMatchMethodValue = [...]ForeignKeyReference_Match{
-	tree.MatchSimple:  ForeignKeyReference_SIMPLE,
-	tree.MatchFull:    ForeignKeyReference_FULL,
-	tree.MatchPartial: ForeignKeyReference_PARTIAL,
+	tree.MatchSimple:  ForeignKeyReference_Match_SIMPLE,
+	tree.MatchFull:    ForeignKeyReference_Match_FULL,
+	tree.MatchPartial: ForeignKeyReference_Match_PARTIAL,
 }
 
 // ForeignKeyReferenceMatchValue allows the conversion from a
 // ForeignKeyReference_Match to a tree.ReferenceCompositeKeyMatchMethod.
 // This should match CompositeKeyMatchMethodValue.
 var ForeignKeyReferenceMatchValue = [...]tree.CompositeKeyMatchMethod{
-	ForeignKeyReference_SIMPLE:  tree.MatchSimple,
-	ForeignKeyReference_FULL:    tree.MatchFull,
-	ForeignKeyReference_PARTIAL: tree.MatchPartial,
+	ForeignKeyReference_Match_SIMPLE:  tree.MatchSimple,
+	ForeignKeyReference_Match_FULL:    tree.MatchFull,
+	ForeignKeyReference_Match_PARTIAL: tree.MatchPartial,
 }
 
 // String implements the fmt.Stringer interface.
 func (x ForeignKeyReference_Match) String() string {
 	switch x {
-	case ForeignKeyReference_SIMPLE:
+	case ForeignKeyReference_Match_SIMPLE:
 		return "MATCH SIMPLE"
-	case ForeignKeyReference_FULL:
+	case ForeignKeyReference_Match_FULL:
 		return "MATCH FULL"
-	case ForeignKeyReference_PARTIAL:
+	case ForeignKeyReference_Match_PARTIAL:
 		return "MATCH PARTIAL"
 	default:
 		return strconv.Itoa(int(x))
@@ -2857,23 +2890,23 @@ func (x ForeignKeyReference_Match) String() string {
 // ForeignKeyReferenceActionValue allows the conversion between a
 // tree.ReferenceAction and a ForeignKeyReference_Action.
 var ForeignKeyReferenceActionValue = [...]ForeignKeyReference_Action{
-	tree.NoAction:   ForeignKeyReference_NO_ACTION,
-	tree.Restrict:   ForeignKeyReference_RESTRICT,
-	tree.SetDefault: ForeignKeyReference_SET_DEFAULT,
-	tree.SetNull:    ForeignKeyReference_SET_NULL,
-	tree.Cascade:    ForeignKeyReference_CASCADE,
+	tree.NoAction:   ForeignKeyReference_Action_NO_ACTION,
+	tree.Restrict:   ForeignKeyReference_Action_RESTRICT,
+	tree.SetDefault: ForeignKeyReference_Action_SET_DEFAULT,
+	tree.SetNull:    ForeignKeyReference_Action_SET_NULL,
+	tree.Cascade:    ForeignKeyReference_Action_CASCADE,
 }
 
 // String implements the fmt.Stringer interface.
 func (x ForeignKeyReference_Action) String() string {
 	switch x {
-	case ForeignKeyReference_RESTRICT:
+	case ForeignKeyReference_Action_RESTRICT:
 		return "RESTRICT"
-	case ForeignKeyReference_SET_DEFAULT:
+	case ForeignKeyReference_Action_SET_DEFAULT:
 		return "SET DEFAULT"
-	case ForeignKeyReference_SET_NULL:
+	case ForeignKeyReference_Action_SET_NULL:
 		return "SET NULL"
-	case ForeignKeyReference_CASCADE:
+	case ForeignKeyReference_Action_CASCADE:
 		return "CASCADE"
 	default:
 		return strconv.Itoa(int(x))

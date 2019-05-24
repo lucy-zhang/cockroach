@@ -72,6 +72,7 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 		&o.tableDesc.TableDescriptor,
 		o.constraint.Index,
 		o.constraint.ReferencedTable.ID,
+		// !!! we need to deal with this and hopefully just not use it at all
 		o.constraint.ReferencedIndex,
 		false, /* limitResults */
 	)

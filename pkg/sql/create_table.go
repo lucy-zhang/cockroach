@@ -333,20 +333,12 @@ func (n *createTableNode) FastPathResults() (int, bool) {
 	return 0, false
 }
 
-type indexMatch bool
-
-const (
-	matchExact  indexMatch = true
-	matchPrefix indexMatch = false
-)
-
 // Referenced cols must be unique, thus referenced indexes must match exactly.
 // Referencing cols have no uniqueness requirement and thus may match a strict
 // prefix of an index.
-func matchesIndex(
-	cols []sqlbase.ColumnDescriptor, idx sqlbase.IndexDescriptor, exact indexMatch,
-) bool {
-	if len(cols) > len(idx.ColumnIDs) || (exact && len(cols) != len(idx.ColumnIDs)) {
+func matchesIndex(cols []sqlbase.ColumnDescriptor, idx sqlbase.IndexDescriptor) bool {
+
+	if len(cols) > len(idx.ColumnIDs) {
 		return false
 	}
 
@@ -406,7 +398,7 @@ const (
 // map of other tables that need to be updated when this table is created.
 // Constraints that are not known to hold for existing data are created
 // "unvalidated", but when table is empty (e.g. during creation), no existing
-// data imples no existing violations, and thus the constraint can be created
+// data implies no existing violations, and thus the constraint can be created
 // without the unvalidated flag.
 //
 // The caller should pass an instance of fkSelfResolver as
@@ -430,7 +422,8 @@ func ResolveFK(
 	backrefs map[sqlbase.ID]*sqlbase.MutableTableDescriptor,
 	ts FKTableState,
 ) error {
-	for _, col := range d.FromCols {
+	originColumnIDs := make(sqlbase.ColumnIDs, len(d.FromCols))
+	for i, col := range d.FromCols {
 		col, _, err := tbl.FindColumnByName(col)
 		if err != nil {
 			return err
@@ -438,6 +431,7 @@ func ResolveFK(
 		if err := col.CheckCanBeFKRef(); err != nil {
 			return err
 		}
+		originColumnIDs[i] = col.ID
 	}
 
 	target, err := ResolveMutableExistingObject(ctx, sc, &d.Table, true /*required*/, ResolveRequireTableDesc)
@@ -504,27 +498,21 @@ func ResolveFK(
 		constraintName = fmt.Sprintf("fk_%s_ref_%s", string(d.FromCols[0]), target.Name)
 	}
 
-	// We can't keep a reference to the index in the slice and at the same time
-	// add a new index to that slice without losing the reference. Instead, keep
-	// the index's index into target's list of indexes. If it is a primary index,
-	// targetIdxIndex is set to -1. Also store the targetIndex's ID so we
-	// don't have to do the lookup twice.
-	targetIdxIndex := -1
-	var targetIdxID sqlbase.IndexID
+	// Search for a unique index on the referenced table that matches our foreign
+	// key columns.
 	if matchesIndex(targetCols, target.PrimaryIndex, matchExact) {
-		targetIdxID = target.PrimaryIndex.ID
+		// We have found a matching referenced index and it's the primary index of
+		// the referenced table. Nothing to do - we can proceed to add the reference.
 	} else {
-		found := false
+		foundMatchingReferencedIndex := false
 		// Find the index corresponding to the referenced column.
-		for i, idx := range target.Indexes {
+		for _, idx := range target.Indexes {
 			if idx.Unique && matchesIndex(targetCols, idx, matchExact) {
-				targetIdxIndex = i
-				targetIdxID = idx.ID
-				found = true
+				foundMatchingReferencedIndex = true
 				break
 			}
 		}
-		if !found {
+		if !foundMatchingReferencedIndex {
 			return pgerror.Newf(
 				pgerror.CodeInvalidForeignKeyError,
 				"there is no unique constraint matching given keys for referenced table %s",
@@ -559,164 +547,59 @@ func ResolveFK(
 		}
 	}
 
-	ref := sqlbase.ForeignKeyReference{
-		Table:           target.ID,
-		Index:           targetIdxID,
-		Name:            constraintName,
-		SharedPrefixLen: int32(len(srcCols)),
-		OnDelete:        sqlbase.ForeignKeyReferenceActionValue[d.Actions.Delete],
-		OnUpdate:        sqlbase.ForeignKeyReferenceActionValue[d.Actions.Update],
-		Match:           sqlbase.CompositeKeyMatchMethodValue[d.Match],
+	referencedColumnIDs := make(sqlbase.ColumnIDs, len(targetCols))
+	for i := range referencedColumnIDs {
+		referencedColumnIDs[i] = targetCols[i].ID
+	}
+
+	ref := sqlbase.ForeignKeyConstraint{
+		ReferencedTableID:   target.ID,
+		OriginColumnIDs:     originColumnIDs,
+		ReferencedColumnIDs: referencedColumnIDs,
+		Name:                constraintName,
+		OnDelete:            sqlbase.ForeignKeyReferenceActionValue[d.Actions.Delete],
+		OnUpdate:            sqlbase.ForeignKeyReferenceActionValue[d.Actions.Update],
+		Match:               sqlbase.CompositeKeyMatchMethodValue[d.Match],
 	}
 
 	if ts != NewTable {
 		ref.Validity = sqlbase.ConstraintValidity_Validating
 	}
-	backref := sqlbase.ForeignKeyReference{Table: tbl.ID}
-
-	var idx *sqlbase.IndexDescriptor
-	found := false
-	if matchesIndex(srcCols, tbl.PrimaryIndex, matchPrefix) {
-		if tbl.PrimaryIndex.ForeignKey.IsSet() {
-			return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
-				"columns cannot be used by multiple foreign key constraints")
-		}
-		idx = &tbl.PrimaryIndex
-		found = true
-	} else {
-		for i := range tbl.Indexes {
-			if matchesIndex(srcCols, tbl.Indexes[i], matchPrefix) {
-				if tbl.Indexes[i].ForeignKey.IsSet() {
-					return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
-						"columns cannot be used by multiple foreign key constraints")
-				}
-				idx = &tbl.Indexes[i]
-				found = true
-				break
-			}
-		}
-	}
-	if found {
-		if ts == NewTable {
-			idx.ForeignKey = ref
-		} else {
-			tbl.AddForeignKeyValidationMutation(&ref, idx.ID)
-		}
-		backref.Index = idx.ID
-	} else {
-		// Avoid unexpected index builds from ALTER TABLE ADD CONSTRAINT.
-		if ts == NonEmptyTable {
-			return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
-				"foreign key requires an existing index on columns %s", colNames(srcCols))
-		}
-		added, err := addIndexForFK(tbl, srcCols, constraintName, ref, ts)
-		if err != nil {
-			return err
-		}
-		backref.Index = added
+	backref := sqlbase.ForeignKeyBackreference{
+		OriginTableID:       tbl.ID,
+		OriginColumnIDs:     originColumnIDs,
+		ReferencedColumnIDs: referencedColumnIDs,
 	}
 
-	if targetIdxIndex > -1 {
-		target.Indexes[targetIdxIndex].ReferencedBy = append(target.Indexes[targetIdxIndex].ReferencedBy, backref)
+	if ts == NewTable {
+		tbl.OutboundFKs = append(tbl.OutboundFKs, &ref)
 	} else {
-		target.PrimaryIndex.ReferencedBy = append(target.PrimaryIndex.ReferencedBy, backref)
+		tbl.AddForeignKeyValidationMutation(&ref)
 	}
+
+	target.InboundFKs = append(target.InboundFKs, &backref)
 
 	// Multiple FKs from the same column would potentially result in ambiguous or
 	// unexpected behavior with conflicting CASCADE/RESTRICT/etc behaviors.
+	// TODO(jordan,lucy): can we lift this restriction?
 	colsInFKs := make(map[sqlbase.ColumnID]struct{})
 
-	fks, err := tbl.AllActiveAndInactiveForeignKeys()
-	if err != nil {
-		return err
-	}
-	for id, fk := range fks {
-		idx, err := tbl.FindIndexByID(id)
-		if err != nil {
-			return err
-		}
-		numCols := len(idx.ColumnIDs)
-		if fk.SharedPrefixLen > 0 {
-			numCols = int(fk.SharedPrefixLen)
-		}
-		for i := 0; i < numCols; i++ {
-			if _, ok := colsInFKs[idx.ColumnIDs[i]]; ok {
+	fks := tbl.AllActiveAndInactiveForeignKeys()
+	for _, fk := range fks {
+		for _, id := range fk.OriginColumnIDs {
+			if _, ok := colsInFKs[id]; ok {
+				col, err := tbl.FindColumnByID(id)
+				if err != nil {
+					return pgerror.AssertionFailedf("trying to add foreign key for column %d that doesn't exist", id)
+				}
 				return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
-					"column %q cannot be used by multiple foreign key constraints", idx.ColumnNames[i])
+					"column %q cannot be used by multiple foreign key constraints", col.Name)
 			}
-			colsInFKs[idx.ColumnIDs[i]] = struct{}{}
+			colsInFKs[id] = struct{}{}
 		}
 	}
 
 	return nil
-}
-
-// Adds an index to a table descriptor (that is in the process of being created)
-// that will support using `srcCols` as the referencing (src) side of an FK.
-func addIndexForFK(
-	tbl *sqlbase.MutableTableDescriptor,
-	srcCols []sqlbase.ColumnDescriptor,
-	constraintName string,
-	ref sqlbase.ForeignKeyReference,
-	ts FKTableState,
-) (sqlbase.IndexID, error) {
-	// No existing index for the referencing columns found, so we add one.
-	idx := sqlbase.IndexDescriptor{
-		Name:             fmt.Sprintf("%s_auto_index_%s", tbl.Name, constraintName),
-		ColumnNames:      make([]string, len(srcCols)),
-		ColumnDirections: make([]sqlbase.IndexDescriptor_Direction, len(srcCols)),
-	}
-	for i, c := range srcCols {
-		idx.ColumnDirections[i] = sqlbase.IndexDescriptor_ASC
-		idx.ColumnNames[i] = c.Name
-	}
-
-	if ts == NewTable {
-		idx.ForeignKey = ref
-		if err := tbl.AddIndex(idx, false); err != nil {
-			return 0, err
-		}
-		if err := tbl.AllocateIDs(); err != nil {
-			return 0, err
-		}
-		added := tbl.Indexes[len(tbl.Indexes)-1]
-
-		// Since we just added the index, we can assume it is the last one rather than
-		// searching all the indexes again. That said, we sanity check that it matches
-		// in case a refactor ever violates that assumption.
-		if !matchesIndex(srcCols, added, matchPrefix) {
-			panic("no matching index and auto-generated index failed to match")
-		}
-		return added.ID, nil
-	}
-
-	// TODO (lucy): In the EmptyTable case, we add an index mutation, making this
-	// the only case where a foreign key is added to an index being added.
-	// Allowing FKs to be added to other indexes/columns also being added should
-	// be a generalization of this special case.
-	if err := tbl.AddIndexMutation(&idx, sqlbase.DescriptorMutation_ADD); err != nil {
-		return 0, err
-	}
-	if err := tbl.AllocateIDs(); err != nil {
-		return 0, err
-	}
-	id := tbl.Mutations[len(tbl.Mutations)-1].GetIndex().ID
-	tbl.AddForeignKeyValidationMutation(&ref, id)
-	return id, nil
-}
-
-// colNames converts a []colDesc to a human-readable string for use in error messages.
-func colNames(cols []sqlbase.ColumnDescriptor) string {
-	var s bytes.Buffer
-	s.WriteString(`("`)
-	for i := range cols {
-		if i != 0 {
-			s.WriteString(`", "`)
-		}
-		s.WriteString(cols[i].Name)
-	}
-	s.WriteString(`")`)
-	return s.String()
 }
 
 func (p *planner) addInterleave(
