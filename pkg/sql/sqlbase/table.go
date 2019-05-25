@@ -260,7 +260,7 @@ type ConstraintDetail struct {
 	Details     string
 	Unvalidated bool
 
-	// Only populated for FK, PK, and Unique Constraints.
+	// Only populated for PK and Unique Constraints.
 	Index *IndexDescriptor
 
 	// Only populated for FK Constraints.
@@ -354,11 +354,7 @@ func (desc *TableDescriptor) collectConstraintInfo(
 	}
 
 	fks := desc.AllActiveAndInactiveForeignKeys()
-	for fk := range fks {
-		idx := f
-		if err != nil {
-			return nil, err
-		}
+	for _, fk := range fks {
 		if _, ok := info[fk.Name]; ok {
 			return nil, pgerror.Newf(pgerror.CodeDuplicateObjectError,
 				"duplicate constraint name: %q", fk.Name)
@@ -366,30 +362,26 @@ func (desc *TableDescriptor) collectConstraintInfo(
 		detail := ConstraintDetail{Kind: ConstraintTypeFK}
 		// Constraints in the Validating state are considered Unvalidated for this purpose
 		detail.Unvalidated = fk.Validity != ConstraintValidity_Validated
-		numCols := len(idx.ColumnIDs)
-		if fk.SharedPrefixLen > 0 {
-			numCols = int(fk.SharedPrefixLen)
+		var err error
+		detail.Columns, err = desc.NamesForColumnIDs(fk.OriginColumnIDs)
+		if err != nil {
+			return nil, err
 		}
-		detail.Columns = idx.ColumnNames[:numCols]
-		detail.Index = idx
-		detail.FK = fk
+		detail.NewFK = fk
 
 		if tableLookup != nil {
-			other, err := tableLookup(fk.Table)
+			other, err := tableLookup(fk.ReferencedTableID)
 			if err != nil {
 				return nil, pgerror.NewAssertionErrorWithWrappedErrf(err,
 					"error resolving table %d referenced in foreign key",
-					log.Safe(fk.Table))
+					log.Safe(fk.ReferencedTableID))
 			}
-			otherIdx, err := other.FindIndexByID(fk.Index)
+			referencedColumnNames, err := other.NamesForColumnIDs(fk.ReferencedColumnIDs)
 			if err != nil {
-				return nil, pgerror.NewAssertionErrorWithWrappedErrf(err,
-					"error resolving index %d in table %s referenced in foreign key",
-					log.Safe(fk.Index), other.Name)
+				return nil, err
 			}
-			detail.Details = fmt.Sprintf("%s.%v", other.Name, otherIdx.ColumnNames)
+			detail.Details = fmt.Sprintf("%s.%v", other.Name, referencedColumnNames)
 			detail.ReferencedTable = other
-			detail.ReferencedIndex = otherIdx
 		}
 		info[fk.Name] = detail
 	}

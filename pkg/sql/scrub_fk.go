@@ -62,18 +62,10 @@ func newSQLForeignKeyCheckOperation(
 func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 	ctx := params.ctx
 
-	prefix := len(o.constraint.Index.ColumnNames)
-	if o.constraint.FK.SharedPrefixLen > 0 {
-		prefix = int(o.constraint.FK.SharedPrefixLen)
-	}
-
 	checkQuery, _, err := nonMatchingRowQuery(
-		prefix,
 		&o.tableDesc.TableDescriptor,
-		o.constraint.Index,
-		o.constraint.ReferencedTable.ID,
-		// !!! we need to deal with this and hopefully just not use it at all
-		o.constraint.ReferencedIndex,
+		o.constraint.NewFK,
+		o.constraint.ReferencedTable,
 		false, /* limitResults */
 	)
 	if err != nil {
@@ -88,13 +80,12 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 	}
 	o.run.rows = rows
 
-	if prefix > 1 && o.constraint.FK.Match == sqlbase.ForeignKeyReference_FULL {
+	if len(o.constraint.NewFK.OriginColumnIDs) > 1 && o.constraint.NewFK.Match == sqlbase.ForeignKeyReference_Match_FULL {
 		// Check if there are any disallowed references where some columns are NULL
 		// and some aren't.
 		checkNullsQuery, _, err := matchFullUnacceptableKeyQuery(
-			prefix,
 			&o.tableDesc.TableDescriptor,
-			o.constraint.Index,
+			o.constraint.NewFK,
 			false, /* limitResults */
 		)
 		if err != nil {
@@ -136,7 +127,7 @@ func (o *sqlForeignKeyCheckOperation) Next(params runParams) (tree.Datums, error
 	details := make(map[string]interface{})
 	rowDetails := make(map[string]interface{})
 	details["row_data"] = rowDetails
-	details["constraint_name"] = o.constraint.FK.Name
+	details["constraint_name"] = o.constraint.NewFK.Name
 
 	// Collect the primary index values for generating the primary key
 	// pretty string.

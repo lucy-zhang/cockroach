@@ -2207,6 +2207,21 @@ func (desc *TableDescriptor) FindCheckByName(
 	return nil, fmt.Errorf("check %q does not exist", name)
 }
 
+// NamesForColumnIDs returns the names for the given column ids, or an error
+// if one or more column ids was missing. Note - this allocates! It's not for
+// hot path code.
+func (desc *TableDescriptor) NamesForColumnIDs(ids ColumnIDs) ([]string, error) {
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		col, err := desc.FindColumnByID(id)
+		if err != nil {
+			return nil, err
+		}
+		names[i] = col.Name
+	}
+	return names, nil
+}
+
 // RenameIndexDescriptor renames an index descriptor.
 func (desc *MutableTableDescriptor) RenameIndexDescriptor(
 	index *IndexDescriptor, name string,

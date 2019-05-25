@@ -234,7 +234,7 @@ func (sc *SchemaChanger) runBackfill(
 }
 
 // AddConstraints publishes a new version of the given table descriptor with the
-// given check constraint added to it, and waits until the entire cluster is on
+// given constraint added to it, and waits until the entire cluster is on
 // the new version of the table descriptor.
 func (sc *SchemaChanger) AddConstraints(
 	ctx context.Context, constraints []sqlbase.ConstraintToUpdate,
@@ -260,20 +260,22 @@ func (sc *SchemaChanger) AddConstraints(
 						desc.Checks = append(desc.Checks, &constraints[i].Check)
 					}
 				case sqlbase.ConstraintToUpdate_FOREIGN_KEY:
-					idx, err := desc.FindIndexByID(added.ForeignKeyIndex)
-					if err != nil {
-						return err
-					}
-					if idx.ForeignKey.IsSet() {
-						if log.V(2) {
-							log.VEventf(
-								ctx, 2,
-								"backfiller tried to add constraint %+v but found existing constraint %+v, presumably due to a retry",
-								added, idx.ForeignKey,
-							)
+					var foundExisting bool
+					for _, def := range desc.OutboundFKs {
+						if def.Name == added.Name {
+							if log.V(2) {
+								log.VEventf(
+									ctx, 2,
+									"backfiller tried to add constraint %+v but found existing constraint %+v, presumably due to a retry",
+									added, def,
+								)
+							}
+							foundExisting = true
+							break
 						}
-					} else {
-						idx.ForeignKey = added.ForeignKey
+					}
+					if !foundExisting {
+						desc.OutboundFKs = append(desc.OutboundFKs, &added.ForeignKey)
 					}
 				}
 			}
@@ -1164,11 +1166,7 @@ func runSchemaChangesInTxn(
 				case sqlbase.ConstraintToUpdate_CHECK:
 					tableDesc.Checks = append(tableDesc.Checks, &t.Constraint.Check)
 				case sqlbase.ConstraintToUpdate_FOREIGN_KEY:
-					idx, err := tableDesc.FindIndexByID(t.Constraint.ForeignKeyIndex)
-					if err != nil {
-						return err
-					}
-					idx.ForeignKey = t.Constraint.ForeignKey
+					tableDesc.OutboundFKs = append(tableDesc.OutboundFKs, &t.Constraint.ForeignKey)
 				default:
 					return pgerror.AssertionFailedf(
 						"unsupported constraint type: %d", log.Safe(t.Constraint.ConstraintType))
@@ -1233,11 +1231,12 @@ func runSchemaChangesInTxn(
 			// validation succeeds.
 
 			// For now, revert the constraint to an unvalidated state.
-			idx, err := tableDesc.FindIndexByID(c.ForeignKeyIndex)
-			if err != nil {
-				return err
+			for _, desc := range tableDesc.OutboundFKs {
+				if desc.Name == c.ForeignKey.Name {
+					desc.Validity = sqlbase.ConstraintValidity_Unvalidated
+					break
+				}
 			}
-			idx.ForeignKey.Validity = sqlbase.ConstraintValidity_Unvalidated
 		default:
 			return pgerror.AssertionFailedf(
 				"unsupported constraint type: %d", log.Safe(c.ConstraintType))
@@ -1313,25 +1312,18 @@ func validateFkInTxn(
 		}()
 	}
 
-	var fkIdx *sqlbase.IndexDescriptor
-	if tableDesc.PrimaryIndex.ForeignKey.IsSet() && tableDesc.PrimaryIndex.ForeignKey.Name == fkName {
-		fkIdx = &tableDesc.PrimaryIndex
-	} else {
-		found := false
-		for i := range tableDesc.Indexes {
-			idx := &tableDesc.Indexes[i]
-			if idx.ForeignKey.IsSet() && idx.ForeignKey.Name == fkName {
-				fkIdx = idx
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("foreign key %s does not exist", fkName)
+	var fk *sqlbase.ForeignKeyConstraint
+	for _, def := range tableDesc.OutboundFKs {
+		if def.Name == fkName {
+			fk = def
+			break
 		}
 	}
+	if fk == nil {
+		return pgerror.AssertionFailedf("foreign key %s does not exist", fkName)
+	}
 
-	return validateForeignKey(ctx, tableDesc.TableDesc(), fkIdx, ie, txn)
+	return validateForeignKey(ctx, tableDesc.TableDesc(), fk, ie, txn)
 }
 
 // columnBackfillInTxn backfills columns for all mutation columns in

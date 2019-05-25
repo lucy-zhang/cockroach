@@ -1220,8 +1220,10 @@ func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError erro
 	// where the indexes refer columns. Whenever a column schema change
 	// is reversed, any index mutation referencing it is also reversed.
 	var droppedMutations map[sqlbase.MutationID]struct{}
+	// backrefs will contain a map from referenced table id to list of constraints
+	// that are backreferences to remove.
 	var backrefs map[sqlbase.ID][]*sqlbase.ConstraintToUpdate
-	_, err := sc.leaseMgr.Publish(ctx, sc.tableID, func(desc *sqlbase.MutableTableDescriptor) error {
+	tableDesc, err := sc.leaseMgr.Publish(ctx, sc.tableID, func(desc *sqlbase.MutableTableDescriptor) error {
 		// Keep track of the column mutations being reversed so that indexes
 		// referencing them can be dropped.
 		columns := make(map[string]struct{})
@@ -1259,11 +1261,11 @@ func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError erro
 				if constraint.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY {
 					fk := &constraint.ForeignKey
 					if fk.ReferencedTableID == desc.ID {
-						if err := removeFKBackReferenceFromTable(desc, fk.Index, desc.ID, constraint.ForeignKeyIndex); err != nil {
+						if err := removeFKBackReferenceFromTable(desc, fk, desc.TableDesc()); err != nil {
 							return err
 						}
 					} else {
-						backrefs[constraint.ForeignKey.Table] = append(backrefs[constraint.ForeignKey.Table], constraint)
+						backrefs[constraint.ForeignKey.ReferencedTableID] = append(backrefs[constraint.ForeignKey.ReferencedTableID], constraint)
 					}
 				}
 			}
@@ -1325,11 +1327,12 @@ func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError erro
 		return err
 	}
 
-	// Drop foreign key backreferences on other tables
-	for tbl, refs := range backrefs {
-		_, err = sc.leaseMgr.Publish(ctx, tbl, func(desc *sqlbase.MutableTableDescriptor) error {
+	// Drop foreign key backreferences on other tables.
+	for referencedTableID, refs := range backrefs {
+		_, err = sc.leaseMgr.Publish(ctx, referencedTableID, func(referencedTableDesc *sqlbase.MutableTableDescriptor) error {
 			for _, ref := range refs {
-				if err := removeFKBackReferenceFromTable(desc, ref.ForeignKey.Index, sc.tableID, ref.ForeignKeyIndex); err != nil {
+				if err := removeFKBackReferenceFromTable(
+					referencedTableDesc, &ref.ForeignKey, tableDesc.TableDesc()); err != nil {
 					return err
 				}
 			}
@@ -1452,13 +1455,14 @@ func (sc *SchemaChanger) maybeDropValidatingConstraint(
 			)
 		}
 	case sqlbase.ConstraintToUpdate_FOREIGN_KEY:
-		idx, err := desc.FindIndexByID(constraint.ForeignKeyIndex)
-		if err != nil {
-			return err
+		foundIdx := -1
+		for i, ref := range desc.OutboundFKs {
+			if ref.Name == constraint.ForeignKey.Name {
+				foundIdx = i
+				break
+			}
 		}
-		if idx.ForeignKey.IsSet() {
-			idx.ForeignKey = sqlbase.ForeignKeyReference{}
-		} else {
+		if foundIdx == -1 {
 			if log.V(2) {
 				log.Infof(
 					ctx,
@@ -1467,6 +1471,7 @@ func (sc *SchemaChanger) maybeDropValidatingConstraint(
 				)
 			}
 		}
+		desc.OutboundFKs = append(desc.OutboundFKs[:foundIdx], desc.OutboundFKs[foundIdx+1:]...)
 	default:
 		return pgerror.AssertionFailedf("unsupported constraint type: %d", log.Safe(constraint.ConstraintType))
 	}
@@ -1666,8 +1671,6 @@ func NewSchemaChangeManager(
 	ambientCtx log.AmbientContext,
 	execCfg *ExecutorConfig,
 	testingKnobs *SchemaChangerTestingKnobs,
-	db client.DB,
-	nodeDesc roachpb.NodeDescriptor,
 	dsp *DistSQLPlanner,
 	ieFactory sqlutil.SessionBoundInternalExecutorFactory,
 ) *SchemaChangeManager {

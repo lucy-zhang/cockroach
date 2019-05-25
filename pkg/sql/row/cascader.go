@@ -76,9 +76,9 @@ Outer:
 			if err != nil {
 				return nil, err
 			}
-			if referencingIndex.ForeignKey.OnDelete == sqlbase.ForeignKeyReference_CASCADE ||
-				referencingIndex.ForeignKey.OnDelete == sqlbase.ForeignKeyReference_SET_DEFAULT ||
-				referencingIndex.ForeignKey.OnDelete == sqlbase.ForeignKeyReference_SET_NULL {
+			if referencingIndex.ForeignKey.OnDelete == sqlbase.ForeignKeyReference_Action_CASCADE ||
+				referencingIndex.ForeignKey.OnDelete == sqlbase.ForeignKeyReference_Action_SET_DEFAULT ||
+				referencingIndex.ForeignKey.OnDelete == sqlbase.ForeignKeyReference_Action_SET_NULL {
 				required = true
 				break Outer
 			}
@@ -147,9 +147,9 @@ Outer:
 			if err != nil {
 				return nil, err
 			}
-			if referencingIndex.ForeignKey.OnUpdate == sqlbase.ForeignKeyReference_CASCADE ||
-				referencingIndex.ForeignKey.OnUpdate == sqlbase.ForeignKeyReference_SET_DEFAULT ||
-				referencingIndex.ForeignKey.OnUpdate == sqlbase.ForeignKeyReference_SET_NULL {
+			if referencingIndex.ForeignKey.OnUpdate == sqlbase.ForeignKeyReference_Action_CASCADE ||
+				referencingIndex.ForeignKey.OnUpdate == sqlbase.ForeignKeyReference_Action_SET_DEFAULT ||
+				referencingIndex.ForeignKey.OnUpdate == sqlbase.ForeignKeyReference_Action_SET_NULL {
 				required = true
 				break Outer
 			}
@@ -201,13 +201,13 @@ func spanForIndexValues(
 	// https://www.postgresql.org/docs/11/sql-createtable.html for details on the
 	// different composite foreign key matching methods.
 	switch match {
-	case sqlbase.ForeignKeyReference_SIMPLE:
+	case sqlbase.ForeignKeyReference_Action_SIMPLE:
 		for _, rowIndex := range indexColIDs {
 			if values[rowIndex] == tree.DNull {
 				return roachpb.Span{}, nil
 			}
 		}
-	case sqlbase.ForeignKeyReference_FULL:
+	case sqlbase.ForeignKeyReference_Action_FULL:
 		var nulls, notNulls bool
 		for _, rowIndex := range indexColIDs {
 			if values[rowIndex] == tree.DNull {
@@ -229,7 +229,7 @@ func spanForIndexValues(
 			return roachpb.Span{}, nil
 		}
 
-	case sqlbase.ForeignKeyReference_PARTIAL:
+	case sqlbase.ForeignKeyReference_Action_PARTIAL:
 		return roachpb.Span{}, pgerror.UnimplementedWithIssue(20305, "MATCH PARTIAL not supported")
 
 	default:
@@ -309,7 +309,7 @@ func spanForPKValues(
 		table,
 		&table.PrimaryIndex,
 		len(table.PrimaryIndex.ColumnIDs),
-		sqlbase.ForeignKeyReference_SIMPLE, /* primary key lookup can always use MATCH SIMPLE */
+		sqlbase.ForeignKeyReference_Action_SIMPLE, /* primary key lookup can always use MATCH SIMPLE */
 		fetchColIDtoRowIndex,
 		values,
 		sqlbase.MakeIndexKeyPrefix(table.TableDesc(), table.PrimaryIndex.ID),
@@ -717,12 +717,12 @@ func (c *cascader) updateRows(
 	// cascade.
 	var referencingIndexValuesByColIDs map[sqlbase.ColumnID]tree.Datum
 	switch action {
-	case sqlbase.ForeignKeyReference_SET_NULL:
+	case sqlbase.ForeignKeyReference_Action_SET_NULL:
 		referencingIndexValuesByColIDs = make(map[sqlbase.ColumnID]tree.Datum)
 		for _, columnID := range referencingIndex.ColumnIDs {
 			referencingIndexValuesByColIDs[columnID] = tree.DNull
 		}
-	case sqlbase.ForeignKeyReference_SET_DEFAULT:
+	case sqlbase.ForeignKeyReference_Action_SET_DEFAULT:
 		referencingIndexValuesByColIDs = make(map[sqlbase.ColumnID]tree.Datum)
 		for _, columnID := range referencingIndex.ColumnIDs {
 			column, err := referencingTable.FindColumnByID(columnID)
@@ -850,7 +850,7 @@ func (c *cascader) updateRows(
 
 				updateRow := make(tree.Datums, len(rowUpdater.UpdateColIDtoRowIndex))
 				switch action {
-				case sqlbase.ForeignKeyReference_CASCADE:
+				case sqlbase.ForeignKeyReference_Action_CASCADE:
 					// Create the updateRow based on the passed in updated values and from
 					// the retrieved row as a fallback.
 					currentUpdatedValue := values.updatedValues.At(i)
@@ -882,7 +882,7 @@ func (c *cascader) updateRows(
 							colID,
 						)
 					}
-				case sqlbase.ForeignKeyReference_SET_NULL, sqlbase.ForeignKeyReference_SET_DEFAULT:
+				case sqlbase.ForeignKeyReference_Action_SET_NULL, sqlbase.ForeignKeyReference_Action_SET_DEFAULT:
 					// Create the updateRow based on the original values and for all
 					// values in the index, either nulls (for SET NULL), or default (for
 					// SET DEFAULT).

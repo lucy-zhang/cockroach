@@ -410,7 +410,7 @@ func (p *planner) removeFKBackReference(
 		return nil
 	}
 
-	if err := removeFKBackReferenceFromTable(tableDesc, ref, referencedTableDesc); err != nil {
+	if err := removeFKBackReferenceFromTable(referencedTableDesc, ref, tableDesc.TableDesc()); err != nil {
 		return err
 	}
 	return p.writeSchemaChange(ctx, referencedTableDesc, sqlbase.InvalidMutationID)
@@ -420,9 +420,9 @@ func (p *planner) removeFKBackReference(
 // remove the foreign key backreference that corresponds to the supplied fk,
 // which is a member of the supplied originTableDesc.
 func removeFKBackReferenceFromTable(
-	originTableDesc *sqlbase.MutableTableDescriptor,
-	fk *sqlbase.ForeignKeyConstraint,
 	referencedTableDesc *sqlbase.MutableTableDescriptor,
+	fk *sqlbase.ForeignKeyConstraint,
+	originTableDesc *sqlbase.TableDescriptor,
 ) error {
 	matchIdx := -1
 	for i, backref := range referencedTableDesc.InboundFKs {
