@@ -1431,8 +1431,8 @@ func forEachTableDescAll(
 	virtualOpts virtualOpts,
 	fn func(*sqlbase.DatabaseDescriptor, string, *sqlbase.TableDescriptor) error,
 ) error {
-	return forEachTableDescWithTableLookupInternal(ctx,
-		p, dbContext, virtualOpts, true, /* allowAdding */
+	return forEachTableDescAllWithTableLookup(ctx,
+		p, dbContext, virtualOpts,
 		func(
 			db *sqlbase.DatabaseDescriptor,
 			scName string,
@@ -1441,6 +1441,19 @@ func forEachTableDescAll(
 		) error {
 			return fn(db, scName, table)
 		})
+}
+
+// forEachTableDescAllWithTableLookup is like forEachTableDescAll, but it also
+// provides a tableLookupFn like forEachTableDescWithTableLookup.
+func forEachTableDescAllWithTableLookup(
+	ctx context.Context,
+	p *planner,
+	dbContext *DatabaseDescriptor,
+	virtualOpts virtualOpts,
+	fn func(*sqlbase.DatabaseDescriptor, string, *sqlbase.TableDescriptor, tableLookupFn) error,
+) error {
+	return forEachTableDescWithTableLookupInternal(ctx,
+		p, dbContext, virtualOpts, true /* allowAdding */, fn)
 }
 
 // forEachTableDescWithTableLookup acts like forEachTableDesc, except it also provides a

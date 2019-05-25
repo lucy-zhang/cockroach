@@ -1145,32 +1145,28 @@ CREATE TABLE crdb_internal.create_statements (
 					if err != nil {
 						return err
 					}
-					allIdx := append(table.Indexes, table.PrimaryIndex)
-					for i := range allIdx {
-						idx := &allIdx[i]
-						if fk := &idx.ForeignKey; fk.IsSet() {
-							f := tree.NewFmtCtx(tree.FmtSimple)
-							f.WriteString("ALTER TABLE ")
-							f.FormatNode(tn)
-							f.WriteString(" ADD CONSTRAINT ")
-							f.FormatNameP(&fk.Name)
-							f.WriteByte(' ')
-							if err := printForeignKeyConstraint(ctx, &f.Buffer, contextName, idx, lCtx); err != nil {
-								return err
-							}
-							if err := alterStmts.Append(tree.NewDString(f.CloseAndGetString())); err != nil {
-								return err
-							}
+					for _, fk := range table.OutboundFKs {
+						f := tree.NewFmtCtx(tree.FmtSimple)
+						f.WriteString("ALTER TABLE ")
+						f.FormatNode(tn)
+						f.WriteString(" ADD CONSTRAINT ")
+						f.FormatNameP(&fk.Name)
+						f.WriteByte(' ')
+						if err := printForeignKeyConstraint(ctx, &f.Buffer, contextName, fk, lCtx); err != nil {
+							return err
+						}
+						if err := alterStmts.Append(tree.NewDString(f.CloseAndGetString())); err != nil {
+							return err
+						}
 
-							f = tree.NewFmtCtx(tree.FmtSimple)
-							f.WriteString("ALTER TABLE ")
-							f.FormatNode(tn)
-							f.WriteString(" VALIDATE CONSTRAINT ")
-							f.FormatNameP(&fk.Name)
+						f = tree.NewFmtCtx(tree.FmtSimple)
+						f.WriteString("ALTER TABLE ")
+						f.FormatNode(tn)
+						f.WriteString(" VALIDATE CONSTRAINT ")
+						f.FormatNameP(&fk.Name)
 
-							if err := validateStmts.Append(tree.NewDString(f.CloseAndGetString())); err != nil {
-								return err
-							}
+						if err := validateStmts.Append(tree.NewDString(f.CloseAndGetString())); err != nil {
+							return err
 						}
 					}
 					stmt, err = ShowCreateTable(ctx, tn, contextName, table, lCtx, false /* ignoreFKs */)
@@ -1410,10 +1406,6 @@ CREATE TABLE crdb_internal.index_columns (
 	},
 }
 
-// crdbInternalBackwardDependenciesTable exposes the backward
-// inter-descriptor dependencies.
-//
-// TODO(tbg): prefix with kv_.
 var crdbInternalBackwardDependenciesTable = virtualSchemaTable{
 	comment: "backward inter-descriptor dependencies starting from tables accessible by current user in current database (KV scan)",
 	schema: `
@@ -1434,33 +1426,17 @@ CREATE TABLE crdb_internal.backward_dependencies (
 		viewDep := tree.NewDString("view")
 		sequenceDep := tree.NewDString("sequence")
 		interleaveDep := tree.NewDString("interleave")
-		return forEachTableDescAll(ctx, p, dbContext, hideVirtual, /* virtual tables have no backward/forward dependencies*/
-			func(db *DatabaseDescriptor, _ string, table *TableDescriptor) error {
+		return forEachTableDescAllWithTableLookup(ctx, p, dbContext, hideVirtual,
+			/* virtual tables have no backward/forward dependencies*/
+			func(db *DatabaseDescriptor, _ string, table *TableDescriptor, tableLookup tableLookupFn) error {
 				tableID := tree.NewDInt(tree.DInt(table.ID))
 				tableName := tree.NewDString(table.Name)
 
 				reportIdxDeps := func(idx *sqlbase.IndexDescriptor) error {
-					idxID := tree.NewDInt(tree.DInt(idx.ID))
-					if idx.ForeignKey.Table != 0 {
-						fkRef := &idx.ForeignKey
-						if err := addRow(
-							tableID, tableName,
-							idxID,
-							tree.DNull,
-							tree.NewDInt(tree.DInt(fkRef.Table)),
-							fkDep,
-							tree.NewDInt(tree.DInt(fkRef.Index)),
-							tree.NewDString(fkRef.Name),
-							tree.NewDString(fmt.Sprintf("SharedPrefixLen: %d", fkRef.SharedPrefixLen)),
-						); err != nil {
-							return err
-						}
-					}
-
 					for _, interleaveParent := range idx.Interleave.Ancestors {
 						if err := addRow(
 							tableID, tableName,
-							idxID,
+							tree.NewDInt(tree.DInt(idx.ID)),
 							tree.DNull,
 							tree.NewDInt(tree.DInt(interleaveParent.TableID)),
 							interleaveDep,
@@ -1473,6 +1449,29 @@ CREATE TABLE crdb_internal.backward_dependencies (
 						}
 					}
 					return nil
+				}
+
+				for _, fk := range table.OutboundFKs {
+					table, err := tableLookup.getTableByID(fk.ReferencedTableID)
+					if err != nil {
+						return err
+					}
+					index, err := findFKReferencedIndex(table, fk.ReferencedColumnIDs)
+					if err != nil {
+						return err
+					}
+					if err := addRow(
+						tableID, tableName,
+						tree.DNull,
+						tree.DNull,
+						tree.NewDInt(tree.DInt(fk.ReferencedTableID)),
+						fkDep,
+						tree.NewDInt(tree.DInt(index.ID)),
+						tree.NewDString(fk.Name),
+						tree.DNull,
+					); err != nil {
+						return err
+					}
 				}
 
 				// Record the backward references of the primary index.
@@ -1552,10 +1551,6 @@ CREATE TABLE crdb_internal.feature_usage (
 	},
 }
 
-// crdbInternalForwardDependenciesTable exposes the forward
-// inter-descriptor dependencies.
-//
-// TODO(tbg): prefix with kv_.
 var crdbInternalForwardDependenciesTable = virtualSchemaTable{
 	comment: "forward inter-descriptor dependencies starting from tables accessible by current user in current database (KV scan)",
 	schema: `
@@ -1581,25 +1576,10 @@ CREATE TABLE crdb_internal.forward_dependencies (
 				tableName := tree.NewDString(table.Name)
 
 				reportIdxDeps := func(idx *sqlbase.IndexDescriptor) error {
-					idxID := tree.NewDInt(tree.DInt(idx.ID))
-					for _, fkRef := range idx.ReferencedBy {
-						if err := addRow(
-							tableID, tableName,
-							idxID,
-							tree.NewDInt(tree.DInt(fkRef.Table)),
-							fkDep,
-							tree.NewDInt(tree.DInt(fkRef.Index)),
-							tree.NewDString(fkRef.Name),
-							tree.NewDString(fmt.Sprintf("SharedPrefixLen: %d", fkRef.SharedPrefixLen)),
-						); err != nil {
-							return err
-						}
-					}
-
 					for _, interleaveRef := range idx.InterleavedBy {
 						if err := addRow(
 							tableID, tableName,
-							idxID,
+							tree.NewDInt(tree.DInt(idx.ID)),
 							tree.NewDInt(tree.DInt(interleaveRef.Table)),
 							interleaveDep,
 							tree.NewDInt(tree.DInt(interleaveRef.Index)),
@@ -1611,6 +1591,20 @@ CREATE TABLE crdb_internal.forward_dependencies (
 						}
 					}
 					return nil
+				}
+
+				for _, fk := range table.InboundFKs {
+					if err := addRow(
+						tableID, tableName,
+						tree.DNull,
+						tree.NewDInt(tree.DInt(fk.OriginTableID)),
+						fkDep,
+						tree.DNull,
+						tree.DNull,
+						tree.DNull,
+					); err != nil {
+						return err
+					}
 				}
 
 				// Record the backward references of the primary index.
