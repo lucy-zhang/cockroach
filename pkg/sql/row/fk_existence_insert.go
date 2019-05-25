@@ -61,20 +61,19 @@ func makeFkExistenceCheckHelperForInsert(
 	// the index descriptors.
 	// TODO(knz): make foreign key constraints independent
 	// of index definitions.
-	for _, idx := range table.AllNonDropIndexes() {
-		if idx.ForeignKey.IsSet() {
-			fk, err := makeFkExistenceCheckBaseHelper(txn, otherTables, idx, idx.ForeignKey, colMap, alloc, CheckInserts)
-			if err == errSkipUnusedFK {
-				continue
-			}
-			if err != nil {
-				return h, err
-			}
-			if h.fks == nil {
-				h.fks = make(map[sqlbase.IndexID][]fkExistenceCheckBaseHelper)
-			}
-			h.fks[idx.ID] = append(h.fks[idx.ID], fk)
+	for _, ref := range table.OutboundFKs {
+		fk, err := makeFkExistenceCheckBaseHelper(txn, otherTables, ref, colMap, alloc, CheckInserts)
+		if err == errSkipUnusedFK {
+			continue
 		}
+		if err != nil {
+			return h, err
+		}
+		if h.fks == nil {
+			h.fks = make(map[sqlbase.IndexID][]fkExistenceCheckBaseHelper)
+		}
+		// The index id here doesn't matter.
+		h.fks[0] = append(h.fks[0], fk)
 	}
 
 	return h, nil
@@ -85,7 +84,7 @@ func (h fkExistenceCheckForInsert) addAllIdxChecks(
 	ctx context.Context, row tree.Datums, traceKV bool,
 ) error {
 	for idx := range h.fks {
-		if err := queueFkExistenceChecksForRow(ctx, h.checker, h.fks, idx, row, traceKV); err != nil {
+		if err := queueFkExistenceChecksForRow(ctx, h.checker, h.fks[idx], row, traceKV); err != nil {
 			return err
 		}
 	}

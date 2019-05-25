@@ -1456,7 +1456,7 @@ CREATE TABLE crdb_internal.backward_dependencies (
 					if err != nil {
 						return err
 					}
-					index, err := findFKReferencedIndex(table, fk.ReferencedColumnIDs)
+					index, err := sqlbase.FindFKReferencedIndex(table, fk.ReferencedColumnIDs)
 					if err != nil {
 						return err
 					}

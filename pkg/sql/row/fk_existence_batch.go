@@ -118,7 +118,7 @@ func (f *fkExistenceBatchChecker) runCheck(
 				if oldRow == nil {
 					return pgerror.Newf(pgerror.CodeForeignKeyViolationError,
 						"foreign key violation: non-empty columns %s referenced in table %q",
-						fk.mutatedIdx.ColumnNames[:fk.prefixLen], fk.searchTable.Name)
+						"TODO(XXX)", fk.searchTable.Name)
 				}
 
 				// TODO(knz): re-allocating a datum slice in every check
@@ -130,7 +130,7 @@ func (f *fkExistenceBatchChecker) runCheck(
 				}
 				return pgerror.Newf(pgerror.CodeForeignKeyViolationError,
 					"foreign key violation: values %v in columns %s referenced in table %q",
-					fkValues, fk.mutatedIdx.ColumnNames[:fk.prefixLen], fk.searchTable.Name)
+					fkValues, "TODO(XXX)", fk.searchTable.Name)
 			}
 
 		default:

@@ -758,7 +758,7 @@ CREATE TABLE pg_catalog.pg_constraint (
 					if err != nil {
 						return err
 					}
-					if idx, err := findFKReferencedIndex(referencedTable, con.FK.ReferencedColumnIDs); err != nil {
+					if idx, err := sqlbase.FindFKReferencedIndex(referencedTable, con.FK.ReferencedColumnIDs); err != nil {
 						// We couldn't find an index that matched. This shouldn't happen.
 						log.Warningf(ctx, "broken fk reference: %v", err)
 					} else {
@@ -996,7 +996,7 @@ CREATE TABLE pg_catalog.pg_depend (
 					return err
 				}
 				refObjID := oidZero
-				if idx, err := findFKReferencedIndex(referencedTable, con.FK.ReferencedColumnIDs); err != nil {
+				if idx, err := sqlbase.FindFKReferencedIndex(referencedTable, con.FK.ReferencedColumnIDs); err != nil {
 					// We couldn't find an index that matched. This shouldn't happen.
 					log.Warningf(ctx, "broken fk reference: %v", err)
 				} else {

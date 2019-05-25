@@ -333,23 +333,6 @@ func (n *createTableNode) FastPathResults() (int, bool) {
 	return 0, false
 }
 
-// Referenced cols must be unique, thus referenced indexes must match exactly.
-// Referencing cols have no uniqueness requirement and thus may match a strict
-// prefix of an index.
-func matchesIndex(cols []sqlbase.ColumnDescriptor, idx sqlbase.IndexDescriptor) bool {
-
-	if len(cols) > len(idx.ColumnIDs) {
-		return false
-	}
-
-	for i := range cols {
-		if cols[i].ID != idx.ColumnIDs[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // resolveFK on the planner calls resolveFK() on the current txn.
 //
 // The caller must make sure the planner is configured to look up
@@ -391,30 +374,6 @@ const (
 	// NonEmptyTable represents an existing non-empty table
 	NonEmptyTable
 )
-
-// findFKReferencedIndex finds the first index in the supplied referencedTable
-// that can satisfy a foreign key of the supplied column ids.
-func findFKReferencedIndex(
-	referencedTable *sqlbase.TableDescriptor, referencedColIDs sqlbase.ColumnIDs,
-) (*sqlbase.IndexDescriptor, error) {
-	// Search for a unique index on the referenced table that matches our foreign
-	// key columns.
-	if referencedColIDs.EqualSets(sqlbase.ColumnIDs(referencedTable.PrimaryIndex.ColumnIDs)) {
-		return &referencedTable.PrimaryIndex, nil
-	} else {
-		// Find the index corresponding to the referenced column.
-		for _, idx := range referencedTable.Indexes {
-			if idx.Unique && referencedColIDs.EqualSets(sqlbase.ColumnIDs(idx.ColumnIDs)) {
-				return &idx, nil
-			}
-		}
-		return nil, pgerror.Newf(
-			pgerror.CodeInvalidForeignKeyError,
-			"there is no unique constraint matching given keys for referenced table %s",
-			referencedTable.Name,
-		)
-	}
-}
 
 // ResolveFK looks up the tables and columns mentioned in a `REFERENCES`
 // constraint and adds metadata representing that constraint to the descriptor.
@@ -528,7 +487,7 @@ func ResolveFK(
 	}
 	// Search for a unique index on the referenced table that matches our foreign
 	// key columns. If one doesn't exist, we can't create the table.
-	if _, err := findFKReferencedIndex(target.TableDesc(), targetColIDs); err != nil {
+	if _, err := sqlbase.FindFKReferencedIndex(target.TableDesc(), targetColIDs); err != nil {
 		return err
 	}
 
@@ -1326,14 +1285,14 @@ func validateComputedColumn(
 		)
 	}
 
-	dependencies := make(map[string]struct{})
+	dependencies := make(map[sqlbase.ColumnID]struct{})
 	// First, check that no column in the expression is a computed column.
 	if err := iterColDescriptorsInExpr(desc, d.Computed.Expr, func(c *sqlbase.ColumnDescriptor) error {
 		if c.IsComputed() {
 			return pgerror.New(pgerror.CodeInvalidTableDefinitionError,
 				"computed columns cannot reference other computed columns")
 		}
-		dependencies[c.Name] = struct{}{}
+		dependencies[c.ID] = struct{}{}
 
 		return nil
 	}); err != nil {
@@ -1343,15 +1302,15 @@ func validateComputedColumn(
 	// TODO(justin,bram): allow depending on columns like this. We disallow it
 	// for now because cascading changes must hook into the computed column
 	// update path.
-	if err := desc.ForeachNonDropIndex(func(idx *sqlbase.IndexDescriptor) error {
-		for _, name := range idx.ColumnNames {
-			if _, ok := dependencies[name]; !ok {
+	for _, fk := range desc.OutboundFKs {
+		for _, id := range fk.OriginColumnIDs {
+			if _, ok := dependencies[id]; !ok {
 				// We don't depend on this column.
 				continue
 			}
 			for _, action := range []sqlbase.ForeignKeyReference_Action{
-				idx.ForeignKey.OnDelete,
-				idx.ForeignKey.OnUpdate,
+				fk.OnDelete,
+				fk.OnUpdate,
 			} {
 				switch action {
 				case sqlbase.ForeignKeyReference_CASCADE,
@@ -1362,9 +1321,6 @@ func validateComputedColumn(
 				}
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	// Replace column references with typed dummies to allow typechecking.

@@ -25,13 +25,12 @@ import (
 func queueFkExistenceChecksForRow(
 	ctx context.Context,
 	checkRunner *fkExistenceBatchChecker,
-	fkInfo map[sqlbase.IndexID][]fkExistenceCheckBaseHelper,
-	mutatedIdx sqlbase.IndexID,
+	mutatedIdxHelpers []fkExistenceCheckBaseHelper,
 	mutatedRow tree.Datums,
 	traceKV bool,
 ) error {
 outer:
-	for i, fk := range fkInfo[mutatedIdx] {
+	for i, fk := range mutatedIdxHelpers {
 		// See https://github.com/cockroachdb/cockroach/issues/20305 or
 		// https://www.postgresql.org/docs/11/sql-createtable.html for details on the
 		// different composite foreign key matching methods.
@@ -50,7 +49,7 @@ outer:
 					continue outer
 				}
 			}
-			if err := checkRunner.addCheck(ctx, mutatedRow, &fkInfo[mutatedIdx][i], traceKV); err != nil {
+			if err := checkRunner.addCheck(ctx, mutatedRow, &mutatedIdxHelpers[i], traceKV); err != nil {
 				return err
 			}
 
@@ -78,7 +77,7 @@ outer:
 			if nulls {
 				continue
 			}
-			if err := checkRunner.addCheck(ctx, mutatedRow, &fkInfo[mutatedIdx][i], traceKV); err != nil {
+			if err := checkRunner.addCheck(ctx, mutatedRow, &mutatedIdxHelpers[i], traceKV); err != nil {
 				return err
 			}
 

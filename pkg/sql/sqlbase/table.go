@@ -411,3 +411,27 @@ func (desc *TableDescriptor) collectConstraintInfo(
 	}
 	return info, nil
 }
+
+// FindFKReferencedIndex finds the first index in the supplied referencedTable
+// that can satisfy a foreign key of the supplied column ids.
+func FindFKReferencedIndex(
+	referencedTable *TableDescriptor, referencedColIDs ColumnIDs,
+) (*IndexDescriptor, error) {
+	// Search for a unique index on the referenced table that matches our foreign
+	// key columns.
+	if referencedColIDs.EqualSets(referencedTable.PrimaryIndex.ColumnIDs) {
+		return &referencedTable.PrimaryIndex, nil
+	} else {
+		// Find the index corresponding to the referenced column.
+		for _, idx := range referencedTable.Indexes {
+			if idx.Unique && referencedColIDs.EqualSets(idx.ColumnIDs) {
+				return &idx, nil
+			}
+		}
+		return nil, pgerror.Newf(
+			pgerror.CodeInvalidForeignKeyError,
+			"there is no unique constraint matching given keys for referenced table %s",
+			referencedTable.Name,
+		)
+	}
+}

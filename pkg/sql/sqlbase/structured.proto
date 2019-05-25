@@ -332,6 +332,7 @@ message IndexDescriptor {
   repeated uint32 composite_column_ids = 13
       [(gogoproto.customname) = "CompositeColumnIDs", (gogoproto.casttype) = "ColumnID"];
 
+  // ForeignKey and ReferencedBy are deprecated and not stored from 19.2 onward.
   optional ForeignKeyReference foreign_key = 9 [(gogoproto.nullable) = false, deprecated = true];
   repeated ForeignKeyReference referenced_by = 10 [(gogoproto.nullable) = false, deprecated = true];
 
@@ -341,7 +342,6 @@ message IndexDescriptor {
 
   // InterleavedBy contains a reference to every table/index that is interleaved
   // into this one.
-  // !!! we should probably deal with this somehow before merging this PR.
   repeated ForeignKeyReference interleaved_by = 12  [(gogoproto.nullable) = false];
 
   // Partitioning, if it's not the zero value, describes how this index's data

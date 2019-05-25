@@ -1201,48 +1201,47 @@ func (desc *TableDescriptor) validateCrossReferences(ctx context.Context, txn *c
 		return targetTable, targetIndex, nil
 	}
 
-	for _, index := range desc.AllNonDropIndexes() {
-		// Check foreign keys.
-		if index.ForeignKey.IsSet() {
-			targetTable, targetIndex, err := findTargetIndex(
-				index.ForeignKey.Table, index.ForeignKey.Index)
-			if err != nil {
-				return pgerror.NewAssertionErrorWithWrappedErrf(err, "invalid foreign key")
-			}
-			found := false
-			for _, backref := range targetIndex.ReferencedBy {
-				if backref.Table == desc.ID && backref.Index == index.ID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return pgerror.AssertionFailedf("missing fk back reference to %q@%q from %q@%q",
-					desc.Name, index.Name, targetTable.Name, targetIndex.Name)
+	// Check foreign keys.
+	for _, fk := range desc.OutboundFKs {
+		referencedTable, err := getTable(fk.ReferencedTableID)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, backref := range referencedTable.InboundFKs {
+			if backref.OriginTableID == desc.ID &&
+				ColumnIDs(backref.OriginColumnIDs).EqualSets(fk.OriginColumnIDs) &&
+				ColumnIDs(backref.ReferencedColumnIDs).EqualSets(fk.ReferencedColumnIDs) {
+				found = true
+				break
 			}
 		}
-		fkBackrefs := make(map[ForeignKeyReference]struct{})
-		for _, backref := range index.ReferencedBy {
-			if _, ok := fkBackrefs[backref]; ok {
-				return pgerror.AssertionFailedf("duplicated fk backreference %+v", backref)
-			}
-			fkBackrefs[backref] = struct{}{}
-			targetTable, err := getTable(backref.Table)
-			if err != nil {
-				return pgerror.NewAssertionErrorWithWrappedErrf(err, "invalid fk backreference table=%d index=%d",
-					backref.Table, log.Safe(backref.Index))
-			}
-			targetIndex, err := targetTable.FindIndexByID(backref.Index)
-			if err != nil {
-				return pgerror.NewAssertionErrorWithWrappedErrf(err, "invalid fk backreference table=%s index=%d",
-					targetTable.Name, log.Safe(backref.Index))
-			}
-			if fk := targetIndex.ForeignKey; fk.Table != desc.ID || fk.Index != index.ID {
-				return pgerror.AssertionFailedf("broken fk backward reference from %q@%q to %q@%q",
-					desc.Name, index.Name, targetTable.Name, targetIndex.Name)
+		if !found {
+			return pgerror.AssertionFailedf("missing fk back reference %s to %q from %q",
+				fk.Name, desc.Name, referencedTable.Name)
+		}
+	}
+	for _, backRef := range desc.InboundFKs {
+		originTable, err := getTable(backRef.OriginTableID)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, fk := range originTable.OutboundFKs {
+			if fk.ReferencedTableID == desc.ID &&
+				ColumnIDs(fk.OriginColumnIDs).EqualSets(backRef.OriginColumnIDs) &&
+				ColumnIDs(fk.ReferencedColumnIDs).EqualSets(backRef.ReferencedColumnIDs) {
+				found = true
+				break
 			}
 		}
+		if !found {
+			return pgerror.AssertionFailedf("missing fk forward reference to %q from %q",
+				desc.Name, originTable.Name)
+		}
+	}
 
+	for _, index := range desc.AllNonDropIndexes() {
 		// Check interleaves.
 		if len(index.Interleave.Ancestors) > 0 {
 			// Only check the most recent ancestor, the rest of them don't point
@@ -2320,15 +2319,11 @@ func (desc *MutableTableDescriptor) RenameConstraint(
 				"constraint %q in the middle of being added, try again later",
 				tree.ErrNameStringP(&detail.FK.Name))
 		}
-		idx, err := desc.FindIndexByID(detail.Index.ID)
+		fk, err := desc.FindFKByName(detail.FK.Name)
 		if err != nil {
 			return err
 		}
-		if !idx.ForeignKey.IsSet() || idx.ForeignKey.Name != oldName {
-			return pgerror.AssertionFailedf("constraint %q not found",
-				tree.ErrNameString(newName))
-		}
-		idx.ForeignKey.Name = newName
+		fk.Name = newName
 		return nil
 
 	case ConstraintTypeCheck:
@@ -2406,6 +2401,33 @@ func (desc *TableDescriptor) GetIndexMutationCapabilities(id IndexID) (bool, boo
 		}
 	}
 	return false, false
+}
+
+// FindIndexByID finds an index (active or inactive) with the specified ID.
+// Must return a pointer to the IndexDescriptor in the TableDescriptor, so that
+// callers can use returned values to modify the TableDesc.
+func (desc *TableDescriptor) FindFKByName(name string) (*ForeignKeyConstraint, error) {
+	for _, fk := range desc.OutboundFKs {
+		if fk.Name == name {
+			return fk, nil
+		}
+	}
+	return nil, fmt.Errorf("fk %q does not exist", name)
+}
+
+// FindFKForBackRef searches the table descriptor for the foreign key constraint
+// that matches the supplied backref, which is present on the supplied table id.
+func (desc *TableDescriptor) FindFKForBackRef(
+	referencedTableID ID, backref *ForeignKeyBackreference,
+) (*ForeignKeyConstraint, error) {
+	for _, fk := range desc.OutboundFKs {
+		if fk.ReferencedTableID == referencedTableID &&
+			ColumnIDs(fk.OriginColumnIDs).EqualSets(backref.OriginColumnIDs) &&
+			ColumnIDs(fk.ReferencedColumnIDs).EqualSets(backref.ReferencedColumnIDs) {
+			return fk, nil
+		}
+	}
+	return nil, pgerror.AssertionFailedf("could not find fk for backref %v", backref)
 }
 
 // IsInterleaved returns true if any part of this this table is interleaved with
@@ -2730,13 +2752,8 @@ func (f ForeignKeyReference) IsSet() bool {
 // InvalidateFKConstraints sets all FK constraints to un-validated.
 func (desc *TableDescriptor) InvalidateFKConstraints() {
 	// We don't use GetConstraintInfo because we want to edit the passed desc.
-	if desc.PrimaryIndex.ForeignKey.IsSet() {
-		desc.PrimaryIndex.ForeignKey.Validity = ConstraintValidity_Unvalidated
-	}
-	for i := range desc.Indexes {
-		if desc.Indexes[i].ForeignKey.IsSet() {
-			desc.Indexes[i].ForeignKey.Validity = ConstraintValidity_Unvalidated
-		}
+	for _, fk := range desc.OutboundFKs {
+		fk.Validity = ConstraintValidity_Unvalidated
 	}
 }
 
@@ -3062,20 +3079,17 @@ func (desc *DatabaseDescriptor) GetAuditMode() TableDescriptor_AuditMode {
 // FindAllReferences returns all the references from a table.
 func (desc *TableDescriptor) FindAllReferences() (map[ID]struct{}, error) {
 	refs := map[ID]struct{}{}
+	for _, fk := range desc.OutboundFKs {
+		refs[fk.ReferencedTableID] = struct{}{}
+	}
+	for _, fk := range desc.InboundFKs {
+		refs[fk.OriginTableID] = struct{}{}
+	}
 	if err := desc.ForeachNonDropIndex(func(index *IndexDescriptor) error {
 		for _, a := range index.Interleave.Ancestors {
 			refs[a.TableID] = struct{}{}
 		}
 		for _, c := range index.InterleavedBy {
-			refs[c.Table] = struct{}{}
-		}
-
-		if index.ForeignKey.IsSet() {
-			to := index.ForeignKey.Table
-			refs[to] = struct{}{}
-		}
-
-		for _, c := range index.ReferencedBy {
 			refs[c.Table] = struct{}{}
 		}
 		return nil

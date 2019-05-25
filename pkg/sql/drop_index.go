@@ -167,7 +167,7 @@ func (p *planner) dropIndexByName(
 		tableDesc.InboundFKs[outputIdx] = ref
 		outputIdx++
 		// First, check if the index we're dropping matches this inbound FK.
-		if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(sqlbase.ColumnIDs(idx.ColumnIDs)) {
+		if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(idx.ColumnIDs) {
 			// If there's no match, then there's no need to check anything further.
 			continue
 		}
@@ -178,12 +178,12 @@ func (p *planner) dropIndexByName(
 			if otherIdx.ID == idx.ID {
 				continue
 			}
-			if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(sqlbase.ColumnIDs(otherIdx.ColumnIDs)) {
+			if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(otherIdx.ColumnIDs) {
 				foundOtherIndexThatSatisfiesFK = true
 				break
 			}
 		}
-		if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(sqlbase.ColumnIDs(tableDesc.PrimaryIndex.ColumnIDs)) {
+		if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(tableDesc.PrimaryIndex.ColumnIDs) {
 			foundOtherIndexThatSatisfiesFK = true
 		}
 

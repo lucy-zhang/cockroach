@@ -118,10 +118,10 @@ func (fks fkExistenceCheckForUpdate) addIndexChecks(
 	ctx context.Context, oldValues, newValues tree.Datums, traceKV bool,
 ) error {
 	for indexID := range fks.indexIDsToCheck {
-		if err := queueFkExistenceChecksForRow(ctx, fks.checker, fks.inbound.fks, indexID, oldValues, traceKV); err != nil {
+		if err := queueFkExistenceChecksForRow(ctx, fks.checker, fks.inbound.fks[indexID], oldValues, traceKV); err != nil {
 			return err
 		}
-		if err := queueFkExistenceChecksForRow(ctx, fks.checker, fks.outbound.fks, indexID, newValues, traceKV); err != nil {
+		if err := queueFkExistenceChecksForRow(ctx, fks.checker, fks.outbound.fks[indexID], newValues, traceKV); err != nil {
 			return err
 		}
 	}
