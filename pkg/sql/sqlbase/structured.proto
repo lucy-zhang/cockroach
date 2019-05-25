@@ -30,24 +30,24 @@ enum ConstraintValidity {
   Validating = 2;
 }
 
-enum ForeignKeyReference_Action {
-  option (gogoproto.goproto_enum_stringer) = false;
-  NO_ACTION = 0;
-  RESTRICT = 1;
-  SET_NULL = 2;
-  SET_DEFAULT = 3;
-  CASCADE = 4;
-}
-
-// Match is the algorithm used to compare composite keys.
-enum ForeignKeyReference_Match {
-  option (gogoproto.goproto_enum_stringer) = false;
-  SIMPLE = 0;
-  FULL = 1;
-  PARTIAL = 2; // Note: not actually supported, but we reserve the value for future use.
-}
-
 message ForeignKeyReference {
+  enum Action {
+    option (gogoproto.goproto_enum_stringer) = false;
+    NO_ACTION = 0;
+    RESTRICT = 1;
+    SET_NULL = 2;
+    SET_DEFAULT = 3;
+    CASCADE = 4;
+  }
+
+  // Match is the algorithm used to compare composite keys.
+  enum Match {
+    option (gogoproto.goproto_enum_stringer) = false;
+    SIMPLE = 0;
+    FULL = 1;
+    PARTIAL = 2; // Note: not actually supported, but we reserve the value for future use.
+  }
+
 
   optional uint32 table = 1 [(gogoproto.nullable) = false, (gogoproto.casttype) = "ID"];
   optional uint32 index = 2 [(gogoproto.nullable) = false, (gogoproto.casttype) = "IndexID"];
@@ -56,11 +56,11 @@ message ForeignKeyReference {
   // If this FK only uses a prefix of the columns in its index, we record how
   // many to avoid spuriously counting the additional cols as used by this FK.
   optional int32 shared_prefix_len = 5 [(gogoproto.nullable) = false];
-  optional ForeignKeyReference_Action on_delete = 6 [(gogoproto.nullable) = false];
-  optional ForeignKeyReference_Action on_update = 7 [(gogoproto.nullable) = false];
+  optional Action on_delete = 6 [(gogoproto.nullable) = false];
+  optional Action on_update = 7 [(gogoproto.nullable) = false];
   // This is only important for composite keys. For all prior matches before
   // the addition of this value, MATCH SIMPLE will be used.
-  optional ForeignKeyReference_Match match = 8 [(gogoproto.nullable) = false];
+  optional Match match = 8 [(gogoproto.nullable) = false];
 }
 
 message ForeignKeyConstraint {
@@ -73,11 +73,11 @@ message ForeignKeyConstraint {
                                             (gogoproto.casttype) = "ColumnID"];
   optional string name = 4 [(gogoproto.nullable) = false];
   optional ConstraintValidity validity = 5 [(gogoproto.nullable) = false];
-  optional ForeignKeyReference_Action on_delete = 6 [(gogoproto.nullable) = false];
-  optional ForeignKeyReference_Action on_update = 7 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference.Action on_delete = 6 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference.Action on_update = 7 [(gogoproto.nullable) = false];
   // This is only important for composite keys. For all prior matches before
   // the addition of this value, MATCH SIMPLE will be used.
-  optional ForeignKeyReference_Match match = 8 [(gogoproto.nullable) = false];
+  optional ForeignKeyReference.Match match = 8 [(gogoproto.nullable) = false];
 }
 
 message ForeignKeyBackreference {

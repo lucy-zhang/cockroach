@@ -264,11 +264,8 @@ type ConstraintDetail struct {
 	Index *IndexDescriptor
 
 	// Only populated for FK Constraints.
-	NewFK           *ForeignKeyConstraint
+	FK              *ForeignKeyConstraint
 	ReferencedTable *TableDescriptor
-	// These are deprecated below here
-	// FK              *ForeignKeyReference
-	// ReferencedIndex *IndexDescriptor
 
 	// Only populated for Check Constraints.
 	CheckConstraint *TableDescriptor_CheckConstraint
@@ -367,7 +364,7 @@ func (desc *TableDescriptor) collectConstraintInfo(
 		if err != nil {
 			return nil, err
 		}
-		detail.NewFK = fk
+		detail.FK = fk
 
 		if tableLookup != nil {
 			other, err := tableLookup(fk.ReferencedTableID)

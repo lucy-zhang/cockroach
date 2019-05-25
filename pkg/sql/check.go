@@ -205,7 +205,7 @@ func validateForeignKey(
 	// For MATCH FULL FKs, first check whether any disallowed keys containing both
 	// null and non-null values exist.
 	// (The matching options only matter for FKs with more than one column.)
-	if nCols > 1 && fk.Match == sqlbase.ForeignKeyReference_Match_FULL {
+	if nCols > 1 && fk.Match == sqlbase.ForeignKeyReference_FULL {
 		query, colNames, err := matchFullUnacceptableKeyQuery(
 			srcTable, fk, true, /* limitResults */
 		)

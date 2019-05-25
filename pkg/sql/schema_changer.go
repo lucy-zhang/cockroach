@@ -1671,6 +1671,8 @@ func NewSchemaChangeManager(
 	ambientCtx log.AmbientContext,
 	execCfg *ExecutorConfig,
 	testingKnobs *SchemaChangerTestingKnobs,
+	db client.DB,
+	nodeDesc roachpb.NodeDescriptor,
 	dsp *DistSQLPlanner,
 	ieFactory sqlutil.SessionBoundInternalExecutorFactory,
 ) *SchemaChangeManager {

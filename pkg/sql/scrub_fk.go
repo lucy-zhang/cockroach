@@ -64,7 +64,7 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 
 	checkQuery, _, err := nonMatchingRowQuery(
 		&o.tableDesc.TableDescriptor,
-		o.constraint.NewFK,
+		o.constraint.FK,
 		o.constraint.ReferencedTable,
 		false, /* limitResults */
 	)
@@ -80,12 +80,12 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 	}
 	o.run.rows = rows
 
-	if len(o.constraint.NewFK.OriginColumnIDs) > 1 && o.constraint.NewFK.Match == sqlbase.ForeignKeyReference_Match_FULL {
+	if len(o.constraint.FK.OriginColumnIDs) > 1 && o.constraint.FK.Match == sqlbase.ForeignKeyReference_FULL {
 		// Check if there are any disallowed references where some columns are NULL
 		// and some aren't.
 		checkNullsQuery, _, err := matchFullUnacceptableKeyQuery(
 			&o.tableDesc.TableDescriptor,
-			o.constraint.NewFK,
+			o.constraint.FK,
 			false, /* limitResults */
 		)
 		if err != nil {
@@ -127,7 +127,7 @@ func (o *sqlForeignKeyCheckOperation) Next(params runParams) (tree.Datums, error
 	details := make(map[string]interface{})
 	rowDetails := make(map[string]interface{})
 	details["row_data"] = rowDetails
-	details["constraint_name"] = o.constraint.NewFK.Name
+	details["constraint_name"] = o.constraint.FK.Name
 
 	// Collect the primary index values for generating the primary key
 	// pretty string.

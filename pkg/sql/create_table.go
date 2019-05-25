@@ -392,6 +392,30 @@ const (
 	NonEmptyTable
 )
 
+// findFKReferencedIndex finds the first index in the supplied referencedTable
+// that can satisfy a foreign key of the supplied column ids.
+func findFKReferencedIndex(
+	referencedTable *sqlbase.TableDescriptor, referencedColIDs sqlbase.ColumnIDs,
+) (*sqlbase.IndexDescriptor, error) {
+	// Search for a unique index on the referenced table that matches our foreign
+	// key columns.
+	if referencedColIDs.EqualSets(sqlbase.ColumnIDs(referencedTable.PrimaryIndex.ColumnIDs)) {
+		return &referencedTable.PrimaryIndex, nil
+	} else {
+		// Find the index corresponding to the referenced column.
+		for _, idx := range referencedTable.Indexes {
+			if idx.Unique && referencedColIDs.EqualSets(sqlbase.ColumnIDs(idx.ColumnIDs)) {
+				return &idx, nil
+			}
+		}
+		return nil, pgerror.Newf(
+			pgerror.CodeInvalidForeignKeyError,
+			"there is no unique constraint matching given keys for referenced table %s",
+			referencedTable.Name,
+		)
+	}
+}
+
 // ResolveFK looks up the tables and columns mentioned in a `REFERENCES`
 // constraint and adds metadata representing that constraint to the descriptor.
 // It may, in doing so, add to or alter descriptors in the passed in `backrefs`
@@ -498,27 +522,14 @@ func ResolveFK(
 		constraintName = fmt.Sprintf("fk_%s_ref_%s", string(d.FromCols[0]), target.Name)
 	}
 
+	targetColIDs := make(sqlbase.ColumnIDs, len(targetCols))
+	for i := range targetCols {
+		targetColIDs[i] = targetCols[i].ID
+	}
 	// Search for a unique index on the referenced table that matches our foreign
-	// key columns.
-	if matchesIndex(targetCols, target.PrimaryIndex, matchExact) {
-		// We have found a matching referenced index and it's the primary index of
-		// the referenced table. Nothing to do - we can proceed to add the reference.
-	} else {
-		foundMatchingReferencedIndex := false
-		// Find the index corresponding to the referenced column.
-		for _, idx := range target.Indexes {
-			if idx.Unique && matchesIndex(targetCols, idx, matchExact) {
-				foundMatchingReferencedIndex = true
-				break
-			}
-		}
-		if !foundMatchingReferencedIndex {
-			return pgerror.Newf(
-				pgerror.CodeInvalidForeignKeyError,
-				"there is no unique constraint matching given keys for referenced table %s",
-				target.Name,
-			)
-		}
+	// key columns. If one doesn't exist, we can't create the table.
+	if _, err := findFKReferencedIndex(target.TableDesc(), targetColIDs); err != nil {
+		return err
 	}
 
 	// Don't add a SET NULL action on an index that has any column that is NOT

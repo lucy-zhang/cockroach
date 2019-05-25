@@ -2276,7 +2276,7 @@ func (desc *MutableTableDescriptor) DropConstraint(
 		return nil
 
 	case ConstraintTypeFK:
-		if err := removeFK(desc, detail.NewFK); err != nil {
+		if err := removeFK(desc, detail.FK); err != nil {
 			return err
 		}
 		// Search through the descriptor's foreign key constraints and delete the
@@ -2315,10 +2315,10 @@ func (desc *MutableTableDescriptor) RenameConstraint(
 		return desc.RenameIndexDescriptor(detail.Index, newName)
 
 	case ConstraintTypeFK:
-		if detail.NewFK.Validity == ConstraintValidity_Validating {
+		if detail.FK.Validity == ConstraintValidity_Validating {
 			return pgerror.Unimplementedf("rename-constraint-fk-mutation",
 				"constraint %q in the middle of being added, try again later",
-				tree.ErrNameStringP(&detail.NewFK.Name))
+				tree.ErrNameStringP(&detail.FK.Name))
 		}
 		idx, err := desc.FindIndexByID(detail.Index.ID)
 		if err != nil {
@@ -2874,28 +2874,28 @@ func (cc *TableDescriptor_CheckConstraint) UsesColumn(
 // CompositeKeyMatchMethodValue allows the conversion from a
 // tree.ReferenceCompositeKeyMatchMethod to a ForeignKeyReference_Match.
 var CompositeKeyMatchMethodValue = [...]ForeignKeyReference_Match{
-	tree.MatchSimple:  ForeignKeyReference_Match_SIMPLE,
-	tree.MatchFull:    ForeignKeyReference_Match_FULL,
-	tree.MatchPartial: ForeignKeyReference_Match_PARTIAL,
+	tree.MatchSimple:  ForeignKeyReference_SIMPLE,
+	tree.MatchFull:    ForeignKeyReference_FULL,
+	tree.MatchPartial: ForeignKeyReference_PARTIAL,
 }
 
 // ForeignKeyReferenceMatchValue allows the conversion from a
 // ForeignKeyReference_Match to a tree.ReferenceCompositeKeyMatchMethod.
 // This should match CompositeKeyMatchMethodValue.
 var ForeignKeyReferenceMatchValue = [...]tree.CompositeKeyMatchMethod{
-	ForeignKeyReference_Match_SIMPLE:  tree.MatchSimple,
-	ForeignKeyReference_Match_FULL:    tree.MatchFull,
-	ForeignKeyReference_Match_PARTIAL: tree.MatchPartial,
+	ForeignKeyReference_SIMPLE:  tree.MatchSimple,
+	ForeignKeyReference_FULL:    tree.MatchFull,
+	ForeignKeyReference_PARTIAL: tree.MatchPartial,
 }
 
 // String implements the fmt.Stringer interface.
 func (x ForeignKeyReference_Match) String() string {
 	switch x {
-	case ForeignKeyReference_Match_SIMPLE:
+	case ForeignKeyReference_SIMPLE:
 		return "MATCH SIMPLE"
-	case ForeignKeyReference_Match_FULL:
+	case ForeignKeyReference_FULL:
 		return "MATCH FULL"
-	case ForeignKeyReference_Match_PARTIAL:
+	case ForeignKeyReference_PARTIAL:
 		return "MATCH PARTIAL"
 	default:
 		return strconv.Itoa(int(x))
@@ -2905,23 +2905,23 @@ func (x ForeignKeyReference_Match) String() string {
 // ForeignKeyReferenceActionValue allows the conversion between a
 // tree.ReferenceAction and a ForeignKeyReference_Action.
 var ForeignKeyReferenceActionValue = [...]ForeignKeyReference_Action{
-	tree.NoAction:   ForeignKeyReference_Action_NO_ACTION,
-	tree.Restrict:   ForeignKeyReference_Action_RESTRICT,
-	tree.SetDefault: ForeignKeyReference_Action_SET_DEFAULT,
-	tree.SetNull:    ForeignKeyReference_Action_SET_NULL,
-	tree.Cascade:    ForeignKeyReference_Action_CASCADE,
+	tree.NoAction:   ForeignKeyReference_NO_ACTION,
+	tree.Restrict:   ForeignKeyReference_RESTRICT,
+	tree.SetDefault: ForeignKeyReference_SET_DEFAULT,
+	tree.SetNull:    ForeignKeyReference_SET_NULL,
+	tree.Cascade:    ForeignKeyReference_CASCADE,
 }
 
 // String implements the fmt.Stringer interface.
 func (x ForeignKeyReference_Action) String() string {
 	switch x {
-	case ForeignKeyReference_Action_RESTRICT:
+	case ForeignKeyReference_RESTRICT:
 		return "RESTRICT"
-	case ForeignKeyReference_Action_SET_DEFAULT:
+	case ForeignKeyReference_SET_DEFAULT:
 		return "SET DEFAULT"
-	case ForeignKeyReference_Action_SET_NULL:
+	case ForeignKeyReference_SET_NULL:
 		return "SET NULL"
-	case ForeignKeyReference_Action_CASCADE:
+	case ForeignKeyReference_CASCADE:
 		return "CASCADE"
 	default:
 		return strconv.Itoa(int(x))
