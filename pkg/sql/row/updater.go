@@ -264,8 +264,11 @@ func makeUpdaterWithoutCascader(
 	}
 
 	var err error
+	if primaryKeyColChange {
+		updateCols = nil
+	}
 	if ru.Fks, err = makeFkExistenceCheckHelperForUpdate(txn, tableDesc, fkTables,
-		ru.FetchColIDtoRowIndex, alloc); err != nil {
+		updateCols, ru.FetchColIDtoRowIndex, alloc); err != nil {
 		return Updater{}, err
 	}
 	return ru, nil

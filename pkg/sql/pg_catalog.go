@@ -781,7 +781,7 @@ CREATE TABLE pg_catalog.pg_constraint (
 						return err
 					}
 					var buf bytes.Buffer
-					if err := printForeignKeyConstraint(ctx, &buf, db.Name, con.FK, tableLookup); err != nil {
+					if err := printForeignKeyConstraint(ctx, &buf, db.Name, table, con.FK, tableLookup); err != nil {
 						return err
 					}
 					condef = tree.NewDString(buf.String())

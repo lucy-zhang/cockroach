@@ -1152,7 +1152,7 @@ CREATE TABLE crdb_internal.create_statements (
 						f.WriteString(" ADD CONSTRAINT ")
 						f.FormatNameP(&fk.Name)
 						f.WriteByte(' ')
-						if err := printForeignKeyConstraint(ctx, &f.Buffer, contextName, fk, lCtx); err != nil {
+						if err := printForeignKeyConstraint(ctx, &f.Buffer, contextName, table, fk, lCtx); err != nil {
 							return err
 						}
 						if err := alterStmts.Append(tree.NewDString(f.CloseAndGetString())); err != nil {
@@ -1406,6 +1406,10 @@ CREATE TABLE crdb_internal.index_columns (
 	},
 }
 
+// crdbInternalBackwardDependenciesTable exposes the backward
+// inter-descriptor dependencies.
+//
+// TODO(tbg): prefix with kv_.
 var crdbInternalBackwardDependenciesTable = virtualSchemaTable{
 	comment: "backward inter-descriptor dependencies starting from tables accessible by current user in current database (KV scan)",
 	schema: `
@@ -1551,6 +1555,10 @@ CREATE TABLE crdb_internal.feature_usage (
 	},
 }
 
+// crdbInternalForwardDependenciesTable exposes the forward
+// inter-descriptor dependencies.
+//
+// TODO(tbg): prefix with kv_.
 var crdbInternalForwardDependenciesTable = virtualSchemaTable{
 	comment: "forward inter-descriptor dependencies starting from tables accessible by current user in current database (KV scan)",
 	schema: `

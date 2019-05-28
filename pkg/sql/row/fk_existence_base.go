@@ -76,6 +76,10 @@ type fkExistenceCheckBaseHelper struct {
 	// searchTable is the descriptor of the searched table. Stored only
 	// for error messages; lookups use the pre-computed searchPrefix.
 	searchTable *sqlbase.ImmutableTableDescriptor
+
+	// mutatedIdx is the descriptor for the target index being mutated.
+	// Stored only for error messages.
+	mutatedIdx *sqlbase.IndexDescriptor
 }
 
 // makeFkExistenceCheckBaseHelper instantiates a FK helper.
@@ -109,6 +113,8 @@ func makeFkExistenceCheckBaseHelper(
 	txn *client.Txn,
 	otherTables FkTableMetadata,
 	ref *sqlbase.ForeignKeyConstraint,
+	searchIdx *sqlbase.IndexDescriptor,
+	mutatedIdx *sqlbase.IndexDescriptor,
 	colMap map[sqlbase.ColumnID]int,
 	alloc *sqlbase.DatumAlloc,
 	dir FKCheckType,
@@ -117,18 +123,6 @@ func makeFkExistenceCheckBaseHelper(
 	searchTable := otherTables[ref.ReferencedTableID].Desc
 	if searchTable == nil {
 		return ret, pgerror.AssertionFailedf("referenced table %d not in provided table map %+v", ref.ReferencedTableID, otherTables)
-	}
-	// Look up any available index for the relevant columns.
-	var searchIdx *sqlbase.IndexDescriptor
-	for i := range searchTable.Indexes {
-		index := &searchTable.Indexes[i]
-		if sqlbase.ColumnIDs(index.ColumnIDs).EqualSets(ref.ReferencedColumnIDs) {
-			searchIdx = index
-			break
-		}
-	}
-	if searchIdx == nil {
-		return ret, pgerror.AssertionFailedf("no available index for fk %q on table %q", ref.Name, searchTable.Name)
 	}
 	// Determine the columns being looked up.
 	ids, err := computeFkCheckColumnIDs(ref, searchIdx, colMap)
@@ -160,7 +154,9 @@ func makeFkExistenceCheckBaseHelper(
 		ref:          ref,
 		searchTable:  searchTable,
 		searchIdx:    searchIdx,
+		mutatedIdx:   mutatedIdx,
 		ids:          ids,
+		prefixLen:    len(ref.OriginColumnIDs),
 		searchPrefix: searchPrefix,
 	}, nil
 }

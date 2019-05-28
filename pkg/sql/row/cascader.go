@@ -1044,7 +1044,7 @@ func (c *cascader) cascadeAll(
 			if err != nil {
 				return err
 			}
-			referencingIndex, err := sqlbase.FindFKReferencedIndex(referencingTable.Desc.TableDesc(), ref.OriginColumnIDs)
+			referencingIndex, err := sqlbase.FindFKOriginIndex(referencingTable.Desc.TableDesc(), ref.OriginColumnIDs)
 			if err != nil {
 				return err
 			}

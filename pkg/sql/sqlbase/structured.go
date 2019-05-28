@@ -107,6 +107,28 @@ func (c ColumnIDs) EqualSets(other ColumnIDs) bool {
 	return true
 }
 
+// Contains returns true if needle is contained within the input list.
+func (c ColumnIDs) Contains(needle ColumnID) bool {
+	for i := range c {
+		if needle == c[i] {
+			return true
+		}
+	}
+	return false
+}
+
+func (c ColumnIDs) HasPrefix(other ColumnIDs) bool {
+	if len(other) > len(c) {
+		return false
+	}
+	for i := range other {
+		if other[i] != c[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // FamilyID is a custom type for ColumnFamilyDescriptor IDs.
 type FamilyID uint32
 

@@ -279,6 +279,9 @@ func (n *alterTableNode) startExec(params runParams) error {
 						return err
 					}
 				}
+				if err := n.tableDesc.Validate(params.ctx, params.p.txn, nil /* clusterVersion */); err != nil {
+					return err
+				}
 
 			default:
 				return pgerror.AssertionFailedf(
@@ -413,6 +416,20 @@ func (n *alterTableNode) startExec(params runParams) error {
 				}
 			}
 
+			output := n.tableDesc.OutboundFKs[:0]
+			for _, fk := range n.tableDesc.OutboundFKs {
+				if sqlbase.ColumnIDs(fk.OriginColumnIDs).Contains(col.ID) {
+					descriptorChanged = true
+					// Delete reverse refs as well.
+					if err := params.p.removeFKBackReference(params.ctx, n.tableDesc, fk); err != nil {
+						return err
+					}
+					continue
+				}
+				output = append(output, fk)
+			}
+			n.tableDesc.OutboundFKs = n.tableDesc.OutboundFKs[:len(output)]
+
 			// Drop check constraints which reference the column.
 			validChecks := n.tableDesc.Checks[:0]
 			for _, check := range n.tableDesc.AllActiveAndInactiveChecks() {
@@ -455,6 +472,9 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return pgerror.Newf(pgerror.CodeObjectNotInPrerequisiteStateError,
 					"column %q in the middle of being added, try again later", t.Column)
 			}
+			if err := n.tableDesc.Validate(params.ctx, params.p.txn, nil /* clusterVersion */); err != nil {
+				return err
+			}
 
 		case *tree.AlterTableDropConstraint:
 			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil)
@@ -478,6 +498,9 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return err
 			}
 			descriptorChanged = true
+			if err := n.tableDesc.Validate(params.ctx, params.p.txn, nil /* clusterVersion */); err != nil {
+				return err
+			}
 
 		case *tree.AlterTableValidateConstraint:
 			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil)

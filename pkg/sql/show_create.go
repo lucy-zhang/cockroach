@@ -48,6 +48,7 @@ func printForeignKeyConstraint(
 	ctx context.Context,
 	buf *bytes.Buffer,
 	dbPrefix string,
+	originTable *sqlbase.TableDescriptor,
 	fk *sqlbase.ForeignKeyConstraint,
 	lCtx *internalLookupCtx,
 ) error {
@@ -69,10 +70,6 @@ func printForeignKeyConstraint(
 		}
 		fkTableName = tree.MakeTableName(tree.Name(fkDb.Name), tree.Name(fkTable.Name))
 		fkTableName.ExplicitSchema = fkDb.Name != dbPrefix
-		originTable, err := lCtx.getTableByID(fk.ReferencedTableID)
-		if err != nil {
-			return err
-		}
 		originNames, err = originTable.NamesForColumnIDs(fk.OriginColumnIDs)
 		if err != nil {
 			return err
@@ -175,7 +172,7 @@ func ShowCreateTable(
 			f.WriteString(",\n\tCONSTRAINT ")
 			f.FormatNameP(&fk.Name)
 			f.WriteString(" ")
-			if err := printForeignKeyConstraint(ctx, &f.Buffer, dbPrefix, fk, lCtx); err != nil {
+			if err := printForeignKeyConstraint(ctx, &f.Buffer, dbPrefix, desc, fk, lCtx); err != nil {
 				return "", err
 			}
 		}

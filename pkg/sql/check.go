@@ -168,7 +168,7 @@ func nonMatchingRowQuery(
 		`SELECT %[1]s FROM 
 		  (SELECT %[2]s FROM [%[3]d AS src]@{IGNORE_FOREIGN_KEYS} WHERE %[4]s) AS s
 			LEFT OUTER JOIN
-			(SELECT * FROM [%[5]d AS target] AS t
+			(SELECT * FROM [%[5]d AS target]) AS t
 			ON %[6]s
 		 WHERE %[7]s IS NULL %[8]s`,
 		strings.Join(qualifiedSrcCols, ", "), // 1

@@ -57,6 +57,21 @@ func makeFkExistenceCheckHelperForDelete(
 			// and thus does not need to be checked for FK violations.
 			continue
 		}
+		//participating := false
+		//if updateCols == nil {
+		//	participating = true
+		//} else {
+		//	for i := range updateCols {
+		//		if sqlbase.ColumnIDs(ref.ReferencedColumnIDs).Contains(updateCols[i].ID) {
+		//			participating = true
+		//		}
+		//		break
+		//	}
+		//}
+		//if !participating {
+		//	// Don't queue a check if the column isn't changed.
+		//	continue
+		//}
 		// TODO(jordan,radu): this is busted, rip out when HP is removed.
 		// Fake a forward foreign key constraint. The HP requires an index on the
 		// reverse table, which won't be required by the CBO. So in HP, fail if we
@@ -83,7 +98,18 @@ func makeFkExistenceCheckHelperForDelete(
 			OnDelete:            foundFK.OnDelete,
 			OnUpdate:            foundFK.OnUpdate,
 		}
-		fk, err := makeFkExistenceCheckBaseHelper(txn, otherTables, fakeRef, colMap, alloc, CheckDeletes)
+		searchIdx, err := sqlbase.FindFKOriginIndex(originTable.Desc.TableDesc(), ref.OriginColumnIDs)
+		if err != nil {
+			return fkExistenceCheckForDelete{}, pgerror.NewAssertionErrorWithWrappedErrf(
+				err, "failed to find available index for deletion")
+		}
+		mutatedIdx, err := sqlbase.FindFKReferencedIndex(table.TableDesc(), ref.ReferencedColumnIDs)
+		if err != nil {
+			return fkExistenceCheckForDelete{}, pgerror.NewAssertionErrorWithWrappedErrf(
+				err, "failed to find available index for deletion")
+		}
+		fk, err := makeFkExistenceCheckBaseHelper(txn, otherTables, fakeRef, searchIdx, mutatedIdx, colMap, alloc,
+			CheckDeletes)
 		if err == errSkipUnusedFK {
 			continue
 		}
@@ -93,7 +119,7 @@ func makeFkExistenceCheckHelperForDelete(
 		if h.fks == nil {
 			h.fks = make(map[sqlbase.IndexID][]fkExistenceCheckBaseHelper)
 		}
-		h.fks[0] = append(h.fks[0], fk)
+		h.fks[mutatedIdx.ID] = append(h.fks[mutatedIdx.ID], fk)
 	}
 
 	return h, nil

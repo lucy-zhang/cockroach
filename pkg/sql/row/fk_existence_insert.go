@@ -16,6 +16,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
@@ -56,13 +57,26 @@ func makeFkExistenceCheckHelperForInsert(
 		},
 	}
 
-	// We need an existence check helper for every referenced
-	// table. Today, referenced tables are determined by
-	// the index descriptors.
-	// TODO(knz): make foreign key constraints independent
-	// of index definitions.
+	// We need an existence check helper for every referenced table.
 	for _, ref := range table.OutboundFKs {
-		fk, err := makeFkExistenceCheckBaseHelper(txn, otherTables, ref, colMap, alloc, CheckInserts)
+		// Look up the searched table.
+		searchTable := otherTables[ref.ReferencedTableID].Desc
+		if searchTable == nil {
+			return h, pgerror.AssertionFailedf("referenced table %d not in provided table map %+v", ref.ReferencedTableID,
+				otherTables)
+		}
+		searchIdx, err := sqlbase.FindFKReferencedIndex(searchTable.TableDesc(), ref.ReferencedColumnIDs)
+		if err != nil {
+			return h, pgerror.NewAssertionErrorWithWrappedErrf(err,
+				"failed to find search index for fk %q", ref.Name)
+		}
+		// TODO(jordan,radu) this isn't necessary.
+		mutatedIdx, err := sqlbase.FindFKOriginIndex(table.TableDesc(), ref.OriginColumnIDs)
+		if err != nil {
+			return h, pgerror.NewAssertionErrorWithWrappedErrf(err,
+				"failed to find search index for fk %q", ref.Name)
+		}
+		fk, err := makeFkExistenceCheckBaseHelper(txn, otherTables, ref, searchIdx, nil, colMap, alloc, CheckInserts)
 		if err == errSkipUnusedFK {
 			continue
 		}
@@ -72,8 +86,7 @@ func makeFkExistenceCheckHelperForInsert(
 		if h.fks == nil {
 			h.fks = make(map[sqlbase.IndexID][]fkExistenceCheckBaseHelper)
 		}
-		// The index id here doesn't matter.
-		h.fks[0] = append(h.fks[0], fk)
+		h.fks[mutatedIdx.ID] = append(h.fks[mutatedIdx.ID], fk)
 	}
 
 	return h, nil

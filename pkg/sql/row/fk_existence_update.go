@@ -67,16 +67,18 @@ func makeFkExistenceCheckHelperForUpdate(
 	txn *client.Txn,
 	table *sqlbase.ImmutableTableDescriptor,
 	otherTables FkTableMetadata,
+	updateCols []sqlbase.ColumnDescriptor,
 	colMap map[sqlbase.ColumnID]int,
 	alloc *sqlbase.DatumAlloc,
 ) (fkExistenceCheckForUpdate, error) {
 	ret := fkExistenceCheckForUpdate{
-		indexIDsToCheck: make(map[sqlbase.IndexID]struct{}),
+		indexIDsToCheck: map[sqlbase.IndexID]struct{}{0: {}},
 	}
 
 	// Instantiate a helper for the referencing tables.
 	var err error
-	if ret.inbound, err = makeFkExistenceCheckHelperForDelete(txn, table, otherTables, colMap, alloc); err != nil {
+	if ret.inbound, err = makeFkExistenceCheckHelperForDelete(txn, table, otherTables, colMap,
+		alloc); err != nil {
 		return ret, err
 	}
 

@@ -435,3 +435,28 @@ func FindFKReferencedIndex(
 		)
 	}
 }
+
+// FindFKOriginIndex finds the first index in the supplied originTable
+// that can satisfy an outgoing foreign key of the supplied column ids.
+// If there's no found index, nil is returned.
+func FindFKOriginIndex(
+	originTable *TableDescriptor, originColIDs ColumnIDs,
+) (*IndexDescriptor, error) {
+	// Search for an index on the origin table that matches our foreign
+	// key columns.
+	if ColumnIDs(originTable.PrimaryIndex.ColumnIDs).HasPrefix(originColIDs) || originColIDs.EqualSets(originTable.PrimaryIndex.ColumnIDs) {
+		return &originTable.PrimaryIndex, nil
+	} else {
+		// Find the index corresponding to the origin column.
+		for _, idx := range originTable.Indexes {
+			if ColumnIDs(idx.ColumnIDs).HasPrefix(originColIDs) || originColIDs.EqualSets(idx.ColumnIDs) {
+				return &idx, nil
+			}
+		}
+		return nil, pgerror.Newf(
+			pgerror.CodeInvalidForeignKeyError,
+			"there is no index matching given keys for referenced table %s",
+			originTable.Name,
+		)
+	}
+}

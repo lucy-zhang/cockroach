@@ -159,7 +159,48 @@ func (p *planner) dropIndexByName(
 	// Now, we have to make sure that all of the foreign keys that point at the
 	// table that this index is a part of still have sufficient unique indexes to
 	// continue being semantically valid.
-	var outputIdx int
+
+	// First check if there's indexes for the outgoing FKs.
+	// TODO(jordan, radu) remove this restriction.
+	outputIdx := 0
+	for _, fk := range tableDesc.OutboundFKs {
+		tableDesc.OutboundFKs[outputIdx] = fk
+		outputIdx++
+		// First, check if the index we're dropping matches this outbound FK.
+		if !sqlbase.ColumnIDs(fk.OriginColumnIDs).EqualSets(idx.ColumnIDs) {
+			// If there's no match, then there's no need to check anything further.
+			continue
+		}
+		foundOtherIndexThatSatisfiesFK := false
+		for _, otherIdx := range tableDesc.Indexes {
+			// Skip ourselves.
+			if otherIdx.ID == idx.ID {
+				continue
+			}
+			if sqlbase.ColumnIDs(fk.OriginColumnIDs).EqualSets(otherIdx.ColumnIDs) {
+				foundOtherIndexThatSatisfiesFK = true
+				break
+			}
+		}
+		if sqlbase.ColumnIDs(fk.OriginColumnIDs).EqualSets(tableDesc.PrimaryIndex.ColumnIDs) {
+			foundOtherIndexThatSatisfiesFK = true
+		}
+		if !foundOtherIndexThatSatisfiesFK {
+			if behavior != tree.DropCascade && constraintBehavior != ignoreIdxConstraint {
+				return errors.Errorf("index %q is in use as a foreign key constraint", idx.Name)
+			}
+			// Now, drop the reference from the table that the index we're
+			// dropping. All we have to do is decrement our outputIdx, which
+			// effectively deletes the element that we're currently looking at from
+			// the list.
+			outputIdx--
+			if err := p.removeFKBackReference(ctx, tableDesc, fk); err != nil {
+				return err
+			}
+		}
+	}
+	tableDesc.OutboundFKs = tableDesc.OutboundFKs[:outputIdx]
+	outputIdx = 0
 	for _, ref := range tableDesc.InboundFKs {
 		// We're updating the tableDesc.InboundFKs list in place, since during this
 		// loop we're going to remove those inbound FKs that are only matched by the
@@ -178,12 +219,16 @@ func (p *planner) dropIndexByName(
 			if otherIdx.ID == idx.ID {
 				continue
 			}
-			if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(otherIdx.ColumnIDs) {
+			// Skip non-unique indexes, which can't satisfy FKs.
+			if !otherIdx.Unique {
+				continue
+			}
+			if sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(otherIdx.ColumnIDs) {
 				foundOtherIndexThatSatisfiesFK = true
 				break
 			}
 		}
-		if !sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(tableDesc.PrimaryIndex.ColumnIDs) {
+		if sqlbase.ColumnIDs(ref.ReferencedColumnIDs).EqualSets(tableDesc.PrimaryIndex.ColumnIDs) {
 			foundOtherIndexThatSatisfiesFK = true
 		}
 
@@ -196,8 +241,30 @@ func (p *planner) dropIndexByName(
 			// effectively deletes the element that we're currently looking at from
 			// the list.
 			outputIdx--
+
+			// Now, we must delete the forward reference from the other table.
+			originTable, err := p.Tables().getMutableTableVersionByID(ctx, ref.OriginTableID, p.txn)
+			if err != nil {
+				return err
+			}
+			foundIdx := -1
+			for i, fk := range originTable.OutboundFKs {
+				if fk.ReferencedTableID == tableDesc.ID &&
+					sqlbase.ColumnIDs(fk.ReferencedColumnIDs).EqualSets(ref.ReferencedColumnIDs) &&
+					sqlbase.ColumnIDs(fk.OriginColumnIDs).EqualSets(ref.OriginColumnIDs) {
+					foundIdx = i
+				}
+			}
+			if foundIdx == -1 {
+				return pgerror.AssertionFailedf("missing forward ref for backref %v", ref)
+			}
+			originTable.OutboundFKs = append(originTable.OutboundFKs[:foundIdx], originTable.OutboundFKs[foundIdx+1:]...)
+			if err := p.writeSchemaChange(ctx, originTable, sqlbase.InvalidMutationID); err != nil {
+				return err
+			}
 		}
 	}
+	tableDesc.InboundFKs = tableDesc.InboundFKs[:outputIdx]
 
 	for _, ref := range idx.InterleavedBy {
 		if err := p.removeInterleave(ctx, ref); err != nil {
@@ -256,9 +323,11 @@ func (p *planner) dropIndexByName(
 		return fmt.Errorf("index %q in the middle of being added, try again later", idxName)
 	}
 
+	/* TODO(jordan): this doesn't work because it doesn't see the
 	if err := tableDesc.Validate(ctx, p.txn, p.EvalContext().Settings); err != nil {
 		return err
 	}
+	*/
 	mutationID, err := p.createOrUpdateSchemaChangeJob(ctx, tableDesc, jobDesc)
 	if err != nil {
 		return err

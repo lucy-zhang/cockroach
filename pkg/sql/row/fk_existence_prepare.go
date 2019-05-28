@@ -15,7 +15,6 @@ package row
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
@@ -114,22 +113,10 @@ func MakeFkMetadata(
 					continue
 				}
 
-				var foundFK *sqlbase.ForeignKeyConstraint
-
 				// Find the outbound fk that corresponds to this backreference.
-				for _, fk := range referencingTableEntry.Desc.OutboundFKs {
-					if fk.ReferencedTableID != tableEntry.Desc.ID {
-						continue
-					}
-					if sqlbase.ColumnIDs(fk.ReferencedColumnIDs).EqualSets(ref.ReferencedColumnIDs) {
-						foundFK = fk
-						break
-					}
-				}
-				if foundFK == nil {
-					return nil, pgerror.AssertionFailedf("missing forward fk for backref from table %d[%v] to table %d[%v]",
-						tableEntry.Desc.ID, ref.ReferencedColumnIDs, ref.OriginTableID, ref.OriginColumnIDs,
-					)
+				foundFK, err := referencingTableEntry.Desc.FindFKForBackRef(tableEntry.Desc.ID, ref)
+				if err != nil {
+					return nil, err
 				}
 
 				if usage == CheckDeletes {

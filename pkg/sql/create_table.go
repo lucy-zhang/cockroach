@@ -517,15 +517,10 @@ func ResolveFK(
 		}
 	}
 
-	referencedColumnIDs := make(sqlbase.ColumnIDs, len(targetCols))
-	for i := range referencedColumnIDs {
-		referencedColumnIDs[i] = targetCols[i].ID
-	}
-
-	ref := sqlbase.ForeignKeyConstraint{
+	ref := &sqlbase.ForeignKeyConstraint{
 		ReferencedTableID:   target.ID,
 		OriginColumnIDs:     originColumnIDs,
-		ReferencedColumnIDs: referencedColumnIDs,
+		ReferencedColumnIDs: targetColIDs,
 		Name:                constraintName,
 		OnDelete:            sqlbase.ForeignKeyReferenceActionValue[d.Actions.Delete],
 		OnUpdate:            sqlbase.ForeignKeyReferenceActionValue[d.Actions.Update],
@@ -538,13 +533,20 @@ func ResolveFK(
 	backref := sqlbase.ForeignKeyBackreference{
 		OriginTableID:       tbl.ID,
 		OriginColumnIDs:     originColumnIDs,
-		ReferencedColumnIDs: referencedColumnIDs,
+		ReferencedColumnIDs: targetColIDs,
 	}
 
+	// Search for an index on the origin table that matches. If one doesn't exist,
+	// we create one automatically.
+	if _, err := sqlbase.FindFKOriginIndex(tbl.TableDesc(), originColumnIDs); err != nil {
+		if _, err := addIndexForFK(tbl, srcCols, constraintName, ts); err != nil {
+			return err
+		}
+	}
 	if ts == NewTable {
-		tbl.OutboundFKs = append(tbl.OutboundFKs, &ref)
+		tbl.OutboundFKs = append(tbl.OutboundFKs, ref)
 	} else {
-		tbl.AddForeignKeyValidationMutation(&ref)
+		tbl.AddForeignKeyValidationMutation(ref)
 	}
 
 	target.InboundFKs = append(target.InboundFKs, &backref)
@@ -570,6 +572,50 @@ func ResolveFK(
 	}
 
 	return nil
+}
+
+// Adds an index to a table descriptor (that is in the process of being created)
+// that will support using `srcCols` as the referencing (src) side of an FK.
+func addIndexForFK(
+	tbl *sqlbase.MutableTableDescriptor,
+	srcCols []sqlbase.ColumnDescriptor,
+	constraintName string,
+	ts FKTableState,
+) (sqlbase.IndexID, error) {
+	// No existing index for the referencing columns found, so we add one.
+	idx := sqlbase.IndexDescriptor{
+		Name:             fmt.Sprintf("%s_auto_index_%s", tbl.Name, constraintName),
+		ColumnNames:      make([]string, len(srcCols)),
+		ColumnDirections: make([]sqlbase.IndexDescriptor_Direction, len(srcCols)),
+	}
+	for i, c := range srcCols {
+		idx.ColumnDirections[i] = sqlbase.IndexDescriptor_ASC
+		idx.ColumnNames[i] = c.Name
+	}
+
+	if ts == NewTable {
+		if err := tbl.AddIndex(idx, false); err != nil {
+			return 0, err
+		}
+		if err := tbl.AllocateIDs(); err != nil {
+			return 0, err
+		}
+		added := tbl.Indexes[len(tbl.Indexes)-1]
+		return added.ID, nil
+	}
+
+	// TODO (lucy): In the EmptyTable case, we add an index mutation, making this
+	// the only case where a foreign key is added to an index being added.
+	// Allowing FKs to be added to other indexes/columns also being added should
+	// be a generalization of this special case.
+	if err := tbl.AddIndexMutation(&idx, sqlbase.DescriptorMutation_ADD); err != nil {
+		return 0, err
+	}
+	if err := tbl.AllocateIDs(); err != nil {
+		return 0, err
+	}
+	id := tbl.Mutations[len(tbl.Mutations)-1].GetIndex().ID
+	return id, nil
 }
 
 func (p *planner) addInterleave(

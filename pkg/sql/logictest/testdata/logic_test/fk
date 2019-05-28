@@ -42,7 +42,7 @@ CREATE TABLE non_unique (product STRING REFERENCES products (vendor))
 statement error type of "customer" \(int\) does not match foreign key "customers"."email" \(string\)
 CREATE TABLE mismatch (customer INT REFERENCES customers (email))
 
-statement error columns cannot be used by multiple foreign key constraints
+statement error column "product" cannot be used by multiple foreign key constraints
 CREATE TABLE orders (
   id INT PRIMARY KEY,
   product STRING REFERENCES products,
@@ -69,7 +69,7 @@ ALTER TABLE orders DROP CONSTRAINT fk_product_ref_products
 statement ok
 ALTER TABLE orders ADD FOREIGN KEY (product) REFERENCES products ON DELETE NO ACTION
 
-statement error pq: columns cannot be used by multiple foreign key constraints
+statement error column "product" cannot be used by multiple foreign key constraints
 ALTER TABLE orders ADD FOREIGN KEY (product) REFERENCES products ON UPDATE NO ACTION
 
 statement ok
@@ -258,9 +258,9 @@ delivery  CREATE TABLE delivery (
           "order" INT8 NULL,
           shipment INT8 NULL,
           item STRING NULL,
+          CONSTRAINT fk_order_ref_orders FOREIGN KEY ("order", shipment) REFERENCES orders (id, shipment),
           CONSTRAINT fk_item_ref_products FOREIGN KEY (item) REFERENCES products (upc),
           INDEX delivery_item_idx (item ASC),
-          CONSTRAINT fk_order_ref_orders FOREIGN KEY ("order", shipment) REFERENCES orders (id, shipment),
           INDEX delivery_auto_index_fk_order_ref_orders ("order" ASC, shipment ASC),
           FAMILY "primary" (ts, "order", shipment, item, rowid)
 )
@@ -306,7 +306,7 @@ ALTER TABLE delivery DROP CONSTRAINT fk_item_ref_products
 statement ok
 UPDATE products SET upc = 'blah' WHERE sku = '780'
 
-statement error pgcode 23503 foreign key violation: "delivery" row item='885155001450', rowid=[0-9]* has no match in "products"
+statement error pgcode 23503 foreign key violation: "delivery" row item='885155001450' has no match in "products"
 ALTER TABLE delivery ADD FOREIGN KEY (item) REFERENCES products (upc)
 
 query TTTTB
