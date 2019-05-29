@@ -93,18 +93,24 @@ func (c ColumnIDs) EqualSets(other ColumnIDs) bool {
 	if len(c) != len(other) {
 		return false
 	}
-	thisCopy := make(ColumnIDs, len(c))
-	otherCopy := make(ColumnIDs, len(other))
-	copy(thisCopy, c)
-	copy(otherCopy, other)
-	sort.Sort(thisCopy)
-	sort.Sort(otherCopy)
-	for i := range thisCopy {
-		if c[i] != otherCopy[i] {
-			return false
+	return c.HasPrefix(other)
+	/*
+		for i := range c {
+			if c[i]
 		}
-	}
-	return true
+		thisCopy := make(ColumnIDs, len(c))
+		otherCopy := make(ColumnIDs, len(other))
+		copy(thisCopy, c)
+		copy(otherCopy, other)
+		sort.Sort(thisCopy)
+		sort.Sort(otherCopy)
+		for i := range thisCopy {
+			if c[i] != otherCopy[i] {
+				return false
+			}
+		}
+		return true
+	*/
 }
 
 // Contains returns true if needle is contained within the input list.

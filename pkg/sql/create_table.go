@@ -537,8 +537,25 @@ func ResolveFK(
 	}
 
 	// Search for an index on the origin table that matches. If one doesn't exist,
-	// we create one automatically.
+	// we create one automatically if the table to alter is empty.
 	if _, err := sqlbase.FindFKOriginIndex(tbl.TableDesc(), originColumnIDs); err != nil {
+		if ts == NonEmptyTable {
+			var colNames bytes.Buffer
+			colNames.WriteString(`("`)
+			for i, id := range originColumnIDs {
+				if i != 0 {
+					colNames.WriteString(`", "`)
+				}
+				col, err := tbl.TableDesc().FindColumnByID(id)
+				if err != nil {
+					return err
+				}
+				colNames.WriteString(col.Name)
+			}
+			colNames.WriteString(`")`)
+			return pgerror.Newf(pgerror.CodeInvalidForeignKeyError,
+				"foreign key requires an existing index on columns %s", colNames.String())
+		}
 		if _, err := addIndexForFK(tbl, srcCols, constraintName, ts); err != nil {
 			return err
 		}
@@ -546,6 +563,9 @@ func ResolveFK(
 	if ts == NewTable {
 		tbl.OutboundFKs = append(tbl.OutboundFKs, ref)
 	} else {
+		// TODO(jordan): we can no longer edit the OutboundFKs after a mutation,
+		// since they don't live on indexes. Is this a problem?
+		tbl.OutboundFKs = append(tbl.OutboundFKs, ref)
 		tbl.AddForeignKeyValidationMutation(ref)
 	}
 
