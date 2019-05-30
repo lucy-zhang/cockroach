@@ -14,8 +14,6 @@ package row
 
 import (
 	"context"
-	"fmt"
-	"runtime/debug"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -213,7 +211,6 @@ func spanForIndexValues(
 			}
 			if nulls && notNulls {
 				// TODO(bram): expand this error to show more details.
-				debug.PrintStack()
 				return roachpb.Span{}, pgerror.Newf(pgerror.CodeForeignKeyViolationError,
 					"foreign key violation: MATCH FULL does not allow mixing of null and nonnull values %s",
 					values,
@@ -255,12 +252,10 @@ func batchRequestForIndexValues(
 
 	//TODO(bram): consider caching some of these values
 	keyPrefix := sqlbase.MakeIndexKeyPrefix(referencingTable.TableDesc(), referencingIndex.ID)
-	// TODO(jordan): this is the wrong prefixLen.
 	prefixLen := len(referencingIndex.ColumnIDs)
 	if len(referencedIndex.ColumnIDs) < prefixLen {
 		prefixLen = len(referencedIndex.ColumnIDs)
 	}
-	fmt.Println("The referencing index is", referencingIndex.Name, referencingIndex.ColumnNames, referencingIndex.ColumnIDs)
 
 	colIDtoRowIndex := make(map[sqlbase.ColumnID]int, len(referencedIndex.ColumnIDs))
 	for i, referencedColID := range referencedIndex.ColumnIDs[:prefixLen] {
@@ -272,7 +267,6 @@ func batchRequestForIndexValues(
 			)
 		}
 	}
-	fmt.Println("The column map is", colIDtoRowIndex)
 
 	var req roachpb.BatchRequest
 	for i := values.startIndex; i < values.endIndex; i++ {
@@ -1063,7 +1057,10 @@ func (c *cascader) cascadeAll(
 						referencedIndex,
 						referencingTable.Desc,
 						referencingIndex,
-						foundFK.Match,
+						// Cascades in the DELETE direction always use MATCH SIMPLE, since
+						// values in referenced tables are allowed to be partially NULL -
+						// they just won't cascade.
+						sqlbase.ForeignKeyReference_SIMPLE,
 						elem,
 						traceKV,
 					)
@@ -1089,7 +1086,7 @@ func (c *cascader) cascadeAll(
 						referencedIndex,
 						referencingTable.Desc,
 						referencingIndex,
-						foundFK.Match,
+						sqlbase.ForeignKeyReference_SIMPLE,
 						elem,
 						foundFK.OnDelete,
 						traceKV,
@@ -1120,7 +1117,7 @@ func (c *cascader) cascadeAll(
 						referencedIndex,
 						referencingTable.Desc,
 						referencingIndex,
-						foundFK.Match,
+						sqlbase.ForeignKeyReference_SIMPLE,
 						elem,
 						foundFK.OnUpdate,
 						traceKV,

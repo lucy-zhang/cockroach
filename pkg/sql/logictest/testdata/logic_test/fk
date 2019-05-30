@@ -2100,4 +2100,4 @@ statement ok
 DELETE FROM t1 WHERE x IS NULL
 
 statement ok
-DROP TABLE t2, t2 CASCADE
+DROP TABLE t1, t2 CASCADE

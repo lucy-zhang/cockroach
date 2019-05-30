@@ -94,9 +94,10 @@ func makeFkExistenceCheckHelperForDelete(
 			ReferencedColumnIDs: ref.OriginColumnIDs,
 			OriginColumnIDs:     ref.ReferencedColumnIDs,
 			ReferencedTableID:   ref.OriginTableID,
-			Match:               foundFK.Match,
-			OnDelete:            foundFK.OnDelete,
-			OnUpdate:            foundFK.OnUpdate,
+			// N.B.: Back-references always must have SIMPLE match method, because ... TODO(jordan) !!!
+			Match:    sqlbase.ForeignKeyReference_SIMPLE,
+			OnDelete: foundFK.OnDelete,
+			OnUpdate: foundFK.OnUpdate,
 		}
 		searchIdx, err := sqlbase.FindFKOriginIndex(originTable.Desc.TableDesc(), ref.OriginColumnIDs)
 		if err != nil {

@@ -35,7 +35,7 @@ outer:
 		// https://www.postgresql.org/docs/11/sql-createtable.html for details on the
 		// different composite foreign key matching methods.
 		//
-		// TODO(knz): it is efficient to do this dynamic dispatch based on
+		// TODO(knz): it is inefficient to do this dynamic dispatch based on
 		// the match type and column layout again for every row. Consider
 		// hoisting some of these checks to once per logical plan.
 		switch fk.ref.Match {

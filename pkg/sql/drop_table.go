@@ -248,7 +248,6 @@ func (p *planner) dropTableImpl(
 	// Remove foreign key back references from tables that this table has foreign
 	// keys to.
 	for _, ref := range tableDesc.OutboundFKs {
-		fmt.Println("Dropping ref")
 		if err := p.removeFKBackReference(ctx, tableDesc, ref); err != nil {
 			return droppedViews, err
 		}
