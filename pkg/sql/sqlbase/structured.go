@@ -198,6 +198,9 @@ type ImmutableTableDescriptor struct {
 	// are all set to nullable while column backfilling is still in
 	// progress, as mutation columns may have NULL values.
 	ReadableColumns []ColumnDescriptor
+
+	inboundFKs  []*ForeignKeyBackreference
+	outboundFKs []*ForeignKeyConstraint
 }
 
 // InvalidMutationID is the uninitialised mutation id.
@@ -318,6 +321,27 @@ func NewImmutableTableDescriptor(tbl TableDescriptor) *ImmutableTableDescriptor 
 	desc.allChecks = make([]TableDescriptor_CheckConstraint, len(tbl.Checks))
 	for i, c := range tbl.Checks {
 		desc.allChecks[i] = *c
+	}
+
+	if desc.InboundFKs != nil || desc.OutboundFKs != nil {
+		desc.inboundFKs = desc.InboundFKs
+		desc.outboundFKs = desc.OutboundFKs
+	} else {
+		for i := range desc.Indexes {
+			idx := &desc.Indexes[i]
+			if idx.ForeignKey.IsSet() {
+				desc.outboundFKs = append(desc.outboundFKs, &ForeignKeyConstraint{
+					Name:                idx.ForeignKey.Name,
+					Validity:            idx.ForeignKey.Validity,
+					OnDelete:            idx.ForeignKey.OnDelete,
+					OnUpdate:            idx.ForeignKey.OnUpdate,
+					Match:               idx.ForeignKey.Match,
+					ReferencedTableID:   idx.ForeignKey.Table,
+					OriginColumnIDs:     idx.ColumnIDs[:idx.ForeignKey.SharedPrefixLen],
+					ReferencedColumnIDs: idx.ForeignKey.Index,
+				})
+			}
+		}
 	}
 
 	return desc
