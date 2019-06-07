@@ -172,7 +172,9 @@ func GetAllDescriptors(ctx context.Context, txn *client.Txn) ([]sqlbase.Descript
 		}
 		switch t := desc.Union.(type) {
 		case *sqlbase.Descriptor_Table:
-			descs[i] = desc.GetTable()
+			table := desc.GetTable()
+			table.MaybeFillInDescriptor(txn)
+			descs[i] = table
 		case *sqlbase.Descriptor_Database:
 			descs[i] = desc.GetDatabase()
 		default:

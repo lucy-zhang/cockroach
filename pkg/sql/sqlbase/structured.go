@@ -323,27 +323,6 @@ func NewImmutableTableDescriptor(tbl TableDescriptor) *ImmutableTableDescriptor 
 		desc.allChecks[i] = *c
 	}
 
-	if desc.InboundFKs != nil || desc.OutboundFKs != nil {
-		desc.inboundFKs = desc.InboundFKs
-		desc.outboundFKs = desc.OutboundFKs
-	} else {
-		for i := range desc.Indexes {
-			idx := &desc.Indexes[i]
-			if idx.ForeignKey.IsSet() {
-				desc.outboundFKs = append(desc.outboundFKs, &ForeignKeyConstraint{
-					Name:                idx.ForeignKey.Name,
-					Validity:            idx.ForeignKey.Validity,
-					OnDelete:            idx.ForeignKey.OnDelete,
-					OnUpdate:            idx.ForeignKey.OnUpdate,
-					Match:               idx.ForeignKey.Match,
-					ReferencedTableID:   idx.ForeignKey.Table,
-					OriginColumnIDs:     idx.ColumnIDs[:idx.ForeignKey.SharedPrefixLen],
-					ReferencedColumnIDs: idx.ForeignKey.Index,
-				})
-			}
-		}
-	}
-
 	return desc
 }
 
@@ -380,6 +359,15 @@ func GetTableDescFromID(ctx context.Context, txn *client.Txn, id ID) (*TableDesc
 	if table == nil {
 		return nil, ErrDescriptorNotFound
 	}
+
+	// This is the only place in the system where we actually get table
+	// descriptors from the database, so we insert a "upgrade step" that turns the
+	// old foreign key representation into the new foreign key representation.
+	// We have a matching transformation that occurs when writing table
+	// descriptors
+
+	table.MaybeFillInDescriptor(txn)
+
 	return table, nil
 }
 
@@ -758,7 +746,7 @@ func generatedFamilyName(familyID FamilyID, columnNames []string) string {
 // This includes format upgrades and optional changes that can be handled by all version
 // (for example: additional default privileges).
 // Returns true if any changes were made.
-func (desc *TableDescriptor) MaybeFillInDescriptor() bool {
+func (desc *TableDescriptor) MaybeFillInDescriptor(txn *client.Txn) bool {
 	changedVersion := desc.maybeUpgradeFormatVersion()
 	changedPrivileges := desc.Privileges.MaybeFixPrivileges(desc.ID)
 	return changedVersion || changedPrivileges

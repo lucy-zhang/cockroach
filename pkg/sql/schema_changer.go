@@ -1866,7 +1866,7 @@ func (s *SchemaChangeManager) Start(stopper *stop.Stopper) {
 					switch union := descriptor.Union.(type) {
 					case *sqlbase.Descriptor_Table:
 						table := union.Table
-						table.MaybeFillInDescriptor()
+						table.MaybeFillInDescriptor(nil)
 						if err := table.ValidateTable(s.execCfg.Settings); err != nil {
 							log.Errorf(ctx, "%s: received invalid table descriptor: %s. Desc: %v",
 								kv.Key, err, table,
