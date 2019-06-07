@@ -768,6 +768,7 @@ message TableDescriptor {
   // inbound_fks contains all foreign key constraints that have this table as
   // the referenced table.
   repeated ForeignKeyBackreference inbound_fks = 35 [(gogoproto.customname) = "InboundFKs"];
+  optional bool did_upgrade_foreign_key_representation = 36 [(gogoproto.nullable) = false];
 }
 
 // DatabaseDescriptor represents a namespace (aka database) and is stored
