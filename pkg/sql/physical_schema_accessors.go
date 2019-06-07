@@ -158,8 +158,7 @@ func (a UncachedPhysicalAccessor) GetObjectDesc(
 	}
 
 	// Look up the table using the discovered database descriptor.
-	desc := &sqlbase.TableDescriptor{}
-	err = getDescriptorByID(ctx, txn, descID, desc)
+	desc, err := sqlbase.GetTableDescFromID(ctx, txn, descID)
 	if err != nil {
 		return nil, err
 	}
