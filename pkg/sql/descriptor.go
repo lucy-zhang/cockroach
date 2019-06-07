@@ -173,7 +173,9 @@ func GetAllDescriptors(ctx context.Context, txn *client.Txn) ([]sqlbase.Descript
 		switch t := desc.Union.(type) {
 		case *sqlbase.Descriptor_Table:
 			table := desc.GetTable()
-			table.MaybeFillInDescriptor(txn)
+			if err := table.MaybeFillInDescriptor(ctx, txn); err != nil {
+				return nil, err
+			}
 			descs[i] = table
 		case *sqlbase.Descriptor_Database:
 			descs[i] = desc.GetDatabase()

@@ -197,7 +197,9 @@ func (s LeaseStore) acquire(
 		if err := filterTableState(tableDesc); err != nil {
 			return err
 		}
-		tableDesc.MaybeFillInDescriptor(txn)
+		if err := table.MaybeFillInDescriptor(ctx, txn); err != nil {
+			return err
+		}
 		// Once the descriptor is set it is immutable and care must be taken
 		// to not modify it.
 		storedLease := &storedTableLease{
@@ -505,7 +507,9 @@ func (s LeaseStore) getForExpiration(
 		if !tableDesc.ModificationTime.Less(prevTimestamp) {
 			return pgerror.AssertionFailedf("unable to read table= (%d, %s)", id, expiration)
 		}
-		tableDesc.MaybeFillInDescriptor(txn)
+		if err := table.MaybeFillInDescriptor(ctx, txn); err != nil {
+			return err
+		}
 		// Create a tableVersionState with the table and without a lease.
 		table = &tableVersionState{
 			ImmutableTableDescriptor: *sqlbase.NewImmutableTableDescriptor(*tableDesc),
@@ -1678,7 +1682,9 @@ func (m *LeaseManager) RefreshLeases(s *stop.Stopper, db *client.DB, g *gossip.G
 						table := union.Table
 						// Note that we don't need to "fill in" the descriptor here. Nobody
 						// actually reads the table.
-						table.MaybeFillInDescriptor(nil)
+						if err := table.MaybeFillInDescriptor(ctx, nil); err != nil {
+							return err
+						}
 						if err := table.ValidateTable(m.settings); err != nil {
 							log.Errorf(ctx, "%s: received invalid table descriptor: %s. Desc: %v",
 								kv.Key, err, table,

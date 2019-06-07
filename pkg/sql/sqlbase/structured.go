@@ -360,13 +360,9 @@ func GetTableDescFromID(ctx context.Context, txn *client.Txn, id ID) (*TableDesc
 		return nil, ErrDescriptorNotFound
 	}
 
-	// This is the only place in the system where we actually get table
-	// descriptors from the database, so we insert a "upgrade step" that turns the
-	// old foreign key representation into the new foreign key representation.
-	// We have a matching transformation that occurs when writing table
-	// descriptors
-
-	table.MaybeFillInDescriptor(txn)
+	if err := table.MaybeFillInDescriptor(ctx, txn); err != nil {
+		return nil, err
+	}
 
 	return table, nil
 }
@@ -746,10 +742,15 @@ func generatedFamilyName(familyID FamilyID, columnNames []string) string {
 // This includes format upgrades and optional changes that can be handled by all version
 // (for example: additional default privileges).
 // Returns true if any changes were made.
-func (desc *TableDescriptor) MaybeFillInDescriptor(txn *client.Txn) bool {
-	changedVersion := desc.maybeUpgradeFormatVersion()
-	changedPrivileges := desc.Privileges.MaybeFixPrivileges(desc.ID)
-	return changedVersion || changedPrivileges
+func (desc *TableDescriptor) MaybeFillInDescriptor(ctx context.Context, txn *client.Txn) error {
+	desc.maybeUpgradeFormatVersion()
+	desc.Privileges.MaybeFixPrivileges(desc.ID)
+	if txn != nil {
+		if _, err := desc.maybeUpgradeForeignKeyRepresentation(ctx, txn); err != nil {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (desc *TableDescriptor) maybeUpgradeForeignKeyRepresentation(ctx context.Context, txn *client.Txn) (bool, error) {
