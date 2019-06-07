@@ -752,6 +752,67 @@ func (desc *TableDescriptor) MaybeFillInDescriptor(txn *client.Txn) bool {
 	return changedVersion || changedPrivileges
 }
 
+func (desc *TableDescriptor) maybeUpgradeForeignKeyRepresentation(ctx context.Context, txn *client.Txn) (bool, error) {
+	otherTables := make(map[ID]*TableDescriptor)
+	indexes := append(desc.Indexes, desc.PrimaryIndex)
+	changed := false
+	for i := range indexes {
+		idx := &desc.Indexes[i]
+		if idx.ForeignKey.IsSet() {
+			ref := &idx.ForeignKey
+			if _, ok := otherTables[ref.Table]; !ok {
+				tbl, err := GetTableDescFromID(ctx, txn, ref.Table)
+				if err != nil {
+					return false, err
+				}
+				otherTables[ref.Table] = tbl
+			}
+
+			referencedIndex, err := otherTables[ref.Table].FindIndexByID(ref.Index)
+			if err != nil {
+				return false, err
+			}
+			numCols := ref.SharedPrefixLen
+			outFK := &ForeignKeyConstraint{
+				ReferencedTableID:   ref.Table,
+				OriginColumnIDs:     idx.ColumnIDs[:numCols],
+				ReferencedColumnIDs: referencedIndex.ColumnIDs[:numCols],
+				Name:                ref.Name,
+				Validity:            ref.Validity,
+				OnDelete:            ref.OnDelete,
+				OnUpdate:            ref.OnUpdate,
+				Match:               ref.Match,
+			}
+			desc.OutboundFKs = append(desc.OutboundFKs, outFK)
+			changed = true
+		}
+		for refIdx := range idx.ReferencedBy {
+			ref := &idx.ReferencedBy[refIdx]
+			if _, ok := otherTables[ref.Table]; !ok {
+				tbl, err := GetTableDescFromID(nil, txn, ref.Table)
+				if err != nil {
+					return false, err
+				}
+				otherTables[ref.Table] = tbl
+			}
+
+			originIndex, err := otherTables[ref.Table].FindIndexByID(ref.Index)
+			if err != nil {
+				return false, err
+			}
+			numCols := ref.SharedPrefixLen
+			inFK := &ForeignKeyBackreference{
+				OriginTableID:       ref.Table,
+				OriginColumnIDs:     originIndex.ColumnIDs[:numCols],
+				ReferencedColumnIDs: idx.ColumnIDs[:numCols],
+			}
+			desc.InboundFKs = append(desc.InboundFKs, inFK)
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
 // maybeUpgradeFormatVersion transforms the TableDescriptor to the latest
 // FormatVersion (if it's not already there) and returns true if any changes
 // were made.
