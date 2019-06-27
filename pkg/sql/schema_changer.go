@@ -1450,53 +1450,14 @@ func (sc *SchemaChanger) refreshStats() {
 func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError error) error {
 	// Reverse the flow of the state machine.
 	var scJob *jobs.Job
-
-	// Get the other tables whose foreign key backreferences need to be removed.
-	var fksByBackrefTable map[sqlbase.ID][]*sqlbase.ConstraintToUpdate
-	err := sc.db.Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
-		fksByBackrefTable = make(map[sqlbase.ID][]*sqlbase.ConstraintToUpdate)
-		var err error
-		desc, err := sqlbase.GetTableDescFromID(ctx, txn, sc.tableID)
-		if err != nil {
-			return err
-		}
-		for _, mutation := range desc.Mutations {
-			if mutation.MutationID != sc.mutationID {
-				break
-			}
-			if constraint := mutation.GetConstraint(); constraint != nil &&
-				constraint.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY &&
-				mutation.Direction == sqlbase.DescriptorMutation_ADD {
-				fk := &constraint.ForeignKey
-				if fk.Table != desc.ID {
-					fksByBackrefTable[constraint.ForeignKey.Table] = append(fksByBackrefTable[constraint.ForeignKey.Table], constraint)
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	tableIDsToUpdate := make([]sqlbase.ID, 0, len(fksByBackrefTable)+1)
-	tableIDsToUpdate = append(tableIDsToUpdate, sc.tableID)
-	for id := range fksByBackrefTable {
-		tableIDsToUpdate = append(tableIDsToUpdate, id)
-	}
-
-	// Create update closure for the table and all other tables with backreferences
 	var droppedMutations map[sqlbase.MutationID]struct{}
-	update := func(descs map[sqlbase.ID]*sqlbase.MutableTableDescriptor) error {
-		scDesc, ok := descs[sc.tableID]
-		if !ok {
-			return errors.AssertionFailedf("required table with ID %d not provided to update closure", sc.tableID)
-		}
+	_, err := sc.leaseMgr.Publish(ctx, sc.tableID, func(desc *sqlbase.MutableTableDescriptor) error {
 		// Keep track of the column mutations being reversed so that indexes
 		// referencing them can be dropped.
 		columns := make(map[string]struct{})
 		droppedMutations = nil
 
-		for i, mutation := range scDesc.Mutations {
+		for i, mutation := range desc.Mutations {
 			if mutation.MutationID != sc.mutationID {
 				// Only reverse the first set of mutations if they have the
 				// mutation ID we're looking for.
@@ -1513,46 +1474,23 @@ func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError erro
 			}
 
 			log.Warningf(ctx, "reverse schema change mutation: %+v", mutation)
-			scDesc.Mutations[i], columns = sc.reverseMutation(mutation, false /*notStarted*/, columns)
-
-			// If the mutation is for validating a constraint that is being added,
-			// drop the constraint because validation has failed
-			if constraint := mutation.GetConstraint(); constraint != nil &&
-				mutation.Direction == sqlbase.DescriptorMutation_ADD {
-				log.Warningf(ctx, "dropping constraint %+v", constraint)
-				if err := sc.maybeDropValidatingConstraint(ctx, scDesc, constraint); err != nil {
-					return err
-				}
-				// Get the foreign key backreferences to remove, and remove them immediately if they're on the same table
-				if constraint.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY {
-					fk := &constraint.ForeignKey
-					backrefTable, ok := descs[fk.Table]
-					if !ok {
-						return errors.AssertionFailedf("required table with ID %d not provided to update closure", sc.tableID)
-					}
-					if err := removeFKBackReferenceFromTable(backrefTable, fk.Index, sc.tableID, constraint.ForeignKeyIndex); err != nil {
-						return err
-					}
-				}
-			}
-			scDesc.Mutations[i].Rollback = true
+			desc.Mutations[i], columns = sc.reverseMutation(mutation, false /*notStarted*/, columns)
+			desc.Mutations[i].Rollback = true
 		}
 
 		// Delete all mutations that reference any of the reversed columns
 		// by running a graph traversal of the mutations.
 		if len(columns) > 0 {
 			var err error
-			droppedMutations, err = sc.deleteIndexMutationsWithReversedColumns(ctx, scDesc, columns)
+			droppedMutations, err = sc.deleteIndexMutationsWithReversedColumns(ctx, desc, columns)
 			if err != nil {
 				return err
 			}
 		}
 
-		// PublishMultiple() will increment the version.
+		// Publish() will increment the version.
 		return nil
-	}
-
-	_, err = sc.leaseMgr.PublishMultiple(ctx, tableIDsToUpdate, update, func(txn *client.Txn) error {
+	}, func(txn *client.Txn) error {
 		// Read the table descriptor from the store. The Version of the
 		// descriptor has already been incremented in the transaction and
 		// this descriptor can be modified without incrementing the version.
@@ -1597,12 +1535,6 @@ func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError erro
 	if err := sc.waitToUpdateLeases(ctx, sc.tableID); err != nil {
 		return err
 	}
-	for id := range fksByBackrefTable {
-		if err := sc.waitToUpdateLeases(ctx, id); err != nil {
-			return err
-		}
-	}
-
 	// Only update the job if the transaction has succeeded. The schame change
 	// job will now references the rollback job.
 	if scJob != nil {
@@ -1817,7 +1749,14 @@ func (sc *SchemaChanger) reverseMutation(
 		if notStarted && mutation.State != sqlbase.DescriptorMutation_DELETE_ONLY {
 			panic(fmt.Sprintf("mutation in bad state: %+v", mutation))
 		}
-
+		// if constraint := mutation.GetConstraint(); constraint != nil {
+		// 	switch constraint.ConstraintType {
+		// 	case sqlbase.ConstraintToUpdate_CHECK, sqlbase.ConstraintToUpdate_NOT_NULL:
+		// 		constraint.Check.Validity = sqlbase.ConstraintValidity_Dropping
+		// 	case sqlbase.ConstraintToUpdate_FOREIGN_KEY:
+		// 		constraint.ForeignKey.Validity = sqlbase.ConstraintValidity_Dropping
+		// 	}
+		// }
 	case sqlbase.DescriptorMutation_DROP:
 		mutation.Direction = sqlbase.DescriptorMutation_ADD
 		if notStarted && mutation.State != sqlbase.DescriptorMutation_DELETE_AND_WRITE_ONLY {

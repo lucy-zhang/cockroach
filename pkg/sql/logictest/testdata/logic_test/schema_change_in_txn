@@ -974,7 +974,7 @@ ALTER TABLE check_table ADD e STRING DEFAULT 'a'
 statement ok
 ALTER TABLE check_table ADD CONSTRAINT e_0 CHECK (e::INT > 0)
 
-statement error pgcode XXA00 validate check constraint: could not parse "a" as type int
+statement error pgcode XXA00 validate check constraint: unsupported comparison operator
 COMMIT
 
 # Constraint e_0 was not added

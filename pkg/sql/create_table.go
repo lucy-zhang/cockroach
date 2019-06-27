@@ -616,7 +616,7 @@ func ResolveFK(
 		if ts == NewTable {
 			idx.ForeignKey = ref
 		} else {
-			tbl.AddForeignKeyValidationMutation(&ref, idx.ID)
+			tbl.AddForeignKeyMutation(&ref, idx.ID, sqlbase.DescriptorMutation_ADD)
 		}
 		backref.Index = idx.ID
 	} else {
@@ -720,7 +720,7 @@ func addIndexForFK(
 		return 0, err
 	}
 	id := tbl.Mutations[len(tbl.Mutations)-1].GetIndex().ID
-	tbl.AddForeignKeyValidationMutation(&ref, id)
+	tbl.AddForeignKeyMutation(&ref, id, sqlbase.DescriptorMutation_ADD)
 	return id, nil
 }
 

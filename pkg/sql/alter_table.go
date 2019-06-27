@@ -233,7 +233,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				} else {
 					ck.Validity = sqlbase.ConstraintValidity_Unvalidated
 				}
-				n.tableDesc.AddCheckMutation(ck)
+				n.tableDesc.AddCheckMutation(ck, sqlbase.DescriptorMutation_ADD)
 
 			case *tree.ForeignKeyConstraintTableDef:
 				for _, colName := range d.FromCols {
@@ -467,7 +467,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return err
 			}
 			name := string(t.Constraint)
-			details, ok := info[name]
+			detail, ok := info[name]
 			if !ok {
 				if t.IfExists {
 					continue
@@ -475,12 +475,71 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return pgerror.Newf(pgcode.UndefinedObject,
 					"constraint %q does not exist", t.Constraint)
 			}
-			if err := n.tableDesc.DropConstraint(
-				name, details,
-				func(desc *sqlbase.MutableTableDescriptor, idx *sqlbase.IndexDescriptor) error {
-					return params.p.removeFKBackReference(params.ctx, desc, idx)
-				}); err != nil {
-				return err
+
+			switch detail.Kind {
+			case sqlbase.ConstraintTypePK:
+				return unimplemented.New("drop-constraint-pk", "cannot drop primary key")
+
+			case sqlbase.ConstraintTypeUnique:
+				return unimplemented.Newf("drop-constraint-unique",
+					"cannot drop UNIQUE constraint %q using ALTER TABLE DROP CONSTRAINT, use DROP INDEX CASCADE instead",
+					tree.ErrNameStringP(&detail.Index.Name))
+
+			case sqlbase.ConstraintTypeCheck:
+				switch detail.CheckConstraint.Validity {
+				case sqlbase.ConstraintValidity_Validating:
+					return unimplemented.Newf("drop-constraint-check-mutation",
+						"constraint %q in the middle of being added, try again later",
+						tree.ErrNameStringP(&detail.CheckConstraint.Name))
+				case sqlbase.ConstraintValidity_Unvalidated:
+					// Unvalidated constraints can be removed immediately
+					for i, c := range n.tableDesc.Checks {
+						if c.Name == name {
+							n.tableDesc.Checks = append(n.tableDesc.Checks[:i], n.tableDesc.Checks[i+1:]...)
+							break
+						}
+					}
+				case sqlbase.ConstraintValidity_Validated:
+					// Validated constraints are dropped in the schema changer, so that
+					// the table remains in a consistent state while they are dropped
+					check, err := n.tableDesc.FindCheckByName(name)
+					if err != nil {
+						 return err
+					}
+					check.Validity = sqlbase.ConstraintValidity_Dropping
+					n.tableDesc.AddCheckMutation(check, sqlbase.DescriptorMutation_DROP)
+				}
+
+			case sqlbase.ConstraintTypeFK:
+				switch detail.FK.Validity {
+				case sqlbase.ConstraintValidity_Validating:
+					return unimplemented.Newf("drop-constraint-foreign-key-mutation",
+						"constraint %q in the middle of being added, try again later",
+						tree.ErrNameStringP(&detail.CheckConstraint.Name))
+				case sqlbase.ConstraintValidity_Unvalidated:
+					// Unvalidated constraints can be removed immediately
+					idx, err := n.tableDesc.FindIndexByID(detail.Index.ID)
+					if err != nil {
+						return err
+					}
+					if err := params.p.removeFKBackReference(params.ctx, n.tableDesc, idx); err != nil {
+						return err
+					}
+					idx.ForeignKey = sqlbase.ForeignKeyReference{}
+				case sqlbase.ConstraintValidity_Validated:
+					// Validated constraints are dropped in the schema changer, so that
+					// the table remains in a consistent state while they are dropped
+					idx, err := n.tableDesc.FindIndexByID(detail.Index.ID)
+					if err != nil {
+						return err
+					}
+					idx.ForeignKey.Validity = sqlbase.ConstraintValidity_Dropping
+					n.tableDesc.AddForeignKeyMutation(&idx.ForeignKey, idx.ID, sqlbase.DescriptorMutation_DROP)
+				}
+
+			default:
+				return unimplemented.Newf(fmt.Sprintf("drop-constraint-%s", detail.Kind),
+					"constraint %q has unsupported type", tree.ErrNameString(name))
 			}
 			descriptorChanged = true
 
@@ -831,7 +890,8 @@ func applyColumnMutation(
 		for k := range info {
 			inuseNames[k] = struct{}{}
 		}
-		tableDesc.AddNotNullValidationMutation(string(t.Column), col.ID, inuseNames)
+		notNullCheckConstraint := MakeNotNullCheckConstraint(string(t.Column), col.ID, inuseNames)
+		tableDesc.AddNotNullMutation(notNullCheckConstraint, sqlbase.DescriptorMutation_ADD)
 
 	case *tree.AlterTableDropNotNull:
 		if col.Nullable {
@@ -845,7 +905,19 @@ func applyColumnMutation(
 					"constraint in the middle of being added, try again later")
 			}
 		}
-		// TODO (lucy): As with FKs and check constraints, move this to the schema changer
+
+		// Add a dummy check constraint that will be dropped in the schema changer
+		info, err := tableDesc.GetConstraintInfo(params.ctx, nil)
+		if err != nil {
+			return err
+		}
+		inuseNames := make(map[string]struct{}, len(info))
+		for k := range info {
+			inuseNames[k] = struct{}{}
+		}
+		notNullCheckConstraint := MakeNotNullCheckConstraint(string(t.Column), col.ID, inuseNames)
+		tableDesc.Checks = append(tableDesc.Checks, notNullCheckConstraint)
+		tableDesc.AddNotNullMutation(notNullCheckConstraint, sqlbase.DescriptorMutation_DROP)
 		col.Nullable = true
 
 	case *tree.AlterTableDropStored:
@@ -982,4 +1054,44 @@ func (p *planner) removeColumnComment(
 		columnID)
 
 	return err
+}
+
+// makeNotNullCheckConstraint creates a dummy check constraint equivalent to a
+// NOT NULL constraint on a column, so that NOT NULL constraints can be added
+// and dropped correctly in the schema changer. This function mutates inuseNames
+// to add the new constraint name.
+func MakeNotNullCheckConstraint(
+	colName string, colID sqlbase.ColumnID, inuseNames map[string]struct{},
+) *sqlbase.TableDescriptor_CheckConstraint {
+	name := fmt.Sprintf("%s_auto_not_null", colName)
+	// If generated name isn't unique, attempt to add a number to the end to
+	// get a unique name, as in generateNameForCheckConstraint().
+	if _, ok := inuseNames[name]; ok {
+		i := 1
+		for {
+			appended := fmt.Sprintf("%s%d", name, i)
+			if _, ok := inuseNames[appended]; !ok {
+				name = appended
+				break
+			}
+			i++
+		}
+	}
+	if inuseNames != nil {
+		inuseNames[name] = struct{}{}
+	}
+
+	expr := &tree.ComparisonExpr{
+		Operator: tree.IsDistinctFrom,
+		Left:     &tree.ColumnItem{ColumnName: tree.Name(colName)},
+		Right:    tree.DNull,
+	}
+
+	return &sqlbase.TableDescriptor_CheckConstraint{
+		Name:                name,
+		Expr:                tree.Serialize(expr),
+		Validity:            sqlbase.ConstraintValidity_Dropping,
+		ColumnIDs:           []sqlbase.ColumnID{colID},
+		IsNonNullConstraint: true,
+	}
 }

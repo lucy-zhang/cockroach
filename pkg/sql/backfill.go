@@ -126,6 +126,7 @@ func (sc *SchemaChanger) runBackfill(
 
 	var constraintsToAddBeforeValidation []sqlbase.ConstraintToUpdate
 	var constraintsToValidate []sqlbase.ConstraintToUpdate
+	var constraintsToDrop []sqlbase.ConstraintToUpdate
 
 	tableDesc, err := sc.updateJobRunningStatus(ctx, RunningStatusBackfill)
 	if err != nil {
@@ -188,12 +189,7 @@ func (sc *SchemaChanger) runBackfill(
 					droppedIndexDescs = append(droppedIndexDescs, *t.Index)
 				}
 			case *sqlbase.DescriptorMutation_Constraint:
-				// Only possible during a rollback
-				if !m.Rollback {
-					return errors.AssertionFailedf(
-						"trying to drop constraint through schema changer outside of a rollback: %+v", t)
-				}
-				// no-op
+				constraintsToDrop = append(constraintsToDrop, *t.Constraint)
 			default:
 				return errors.AssertionFailedf(
 					"unsupported mutation: %+v", m)
@@ -201,7 +197,14 @@ func (sc *SchemaChanger) runBackfill(
 		}
 	}
 
-	// First drop indexes, then add/drop columns, and only then add indexes and constraints.
+	// First drop constraints and indexes, then add/drop columns, and only then add indexes and constraints.
+
+	// Drop constraints (which were previously Validated).
+	if len(constraintsToDrop) > 0 {
+		if err := sc.dropConstraints(ctx, constraintsToDrop); err != nil {
+			return err
+		}
+	}
 
 	// Drop indexes not to be removed by `ClearRange`.
 	if len(droppedIndexDescs) > 0 {
@@ -235,7 +238,7 @@ func (sc *SchemaChanger) runBackfill(
 	// validation occurs only when the entire cluster is already enforcing the
 	// constraint on insert/update.
 	if len(constraintsToAddBeforeValidation) > 0 {
-		if err := sc.AddConstraints(ctx, constraintsToAddBeforeValidation); err != nil {
+		if err := sc.addConstraints(ctx, constraintsToAddBeforeValidation); err != nil {
 			return err
 		}
 	}
@@ -250,9 +253,9 @@ func (sc *SchemaChanger) runBackfill(
 }
 
 // AddConstraints publishes a new version of the given table descriptor with the
-// given check constraint added to it, and waits until the entire cluster is on
+// given constraints added to it, and waits until the entire cluster is on
 // the new version of the table descriptor.
-func (sc *SchemaChanger) AddConstraints(
+func (sc *SchemaChanger) addConstraints(
 	ctx context.Context, constraints []sqlbase.ConstraintToUpdate,
 ) error {
 	fksByBackrefTable := make(map[sqlbase.ID][]*sqlbase.ConstraintToUpdate)
@@ -283,10 +286,13 @@ func (sc *SchemaChanger) AddConstraints(
 					if c.Name == constraint.Name {
 						log.VEventf(
 							ctx, 2,
-							"backfiller tried to add constraint %+v but found existing constraint %+v, presumably due to a retry",
+							"backfiller tried to add constraint %+v but found existing constraint %+v, presumably due to a retry or rollback",
 							constraint, c,
 						)
 						found = true
+						// Ensure the constraint on the descriptor is set to Validating, in
+						// case we're in the middle of rolling back DROP CONSTRAINT
+						c.Validity = sqlbase.ConstraintValidity_Validating
 						break
 					}
 				}
@@ -302,9 +308,12 @@ func (sc *SchemaChanger) AddConstraints(
 					if log.V(2) {
 						log.VEventf(
 							ctx, 2,
-							"backfiller tried to add constraint %+v but found existing constraint %+v, presumably due to a retry",
+							"backfiller tried to add constraint %+v but found existing constraint %+v, presumably due to a retry or rollback",
 							constraint, idx.ForeignKey,
 						)
+						// Ensure the constraint on the descriptor is set to Validating, in
+						// case we're in the middle of rolling back DROP CONSTRAINT
+						idx.ForeignKey.Validity = sqlbase.ConstraintValidity_Validating
 					}
 				} else {
 					idx.ForeignKey = constraint.ForeignKey
@@ -449,6 +458,93 @@ func (sc *SchemaChanger) validateConstraints(
 		})
 		return grp.Wait()
 	})
+}
+
+func (sc *SchemaChanger) dropConstraints(
+	ctx context.Context, constraints []sqlbase.ConstraintToUpdate,
+) error {
+	fksByBackrefTable := make(map[sqlbase.ID][]*sqlbase.ConstraintToUpdate)
+	for i := range constraints {
+		c := &constraints[i]
+		if c.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY && c.ForeignKey.Table != sc.tableID {
+			fksByBackrefTable[c.ForeignKey.Table] = append(fksByBackrefTable[c.ForeignKey.Table], c)
+		}
+	}
+	tableIDsToUpdate := make([]sqlbase.ID, 0, len(fksByBackrefTable)+1)
+	tableIDsToUpdate = append(tableIDsToUpdate, sc.tableID)
+	for id := range fksByBackrefTable {
+		tableIDsToUpdate = append(tableIDsToUpdate, id)
+	}
+
+	// Create update closure for the table and all other tables with backreferences
+	update := func(descs map[sqlbase.ID]*sqlbase.MutableTableDescriptor) error {
+		scTable, ok := descs[sc.tableID]
+		if !ok {
+			return errors.AssertionFailedf("required table with ID %d not provided to update closure", sc.tableID)
+		}
+		for i := range constraints {
+			constraint := &constraints[i]
+			switch constraint.ConstraintType {
+			case sqlbase.ConstraintToUpdate_CHECK, sqlbase.ConstraintToUpdate_NOT_NULL:
+				found := false
+				// TODO (lucy): look at IsNotNullConstraint?
+				for j, c := range scTable.Checks {
+					if c.Name == constraint.Name {
+						found = true
+						scTable.Checks = append(scTable.Checks[:j], scTable.Checks[j+1:]...)
+						break
+					}
+				}
+				if !found {
+					log.VEventf(
+						ctx, 2,
+						"backfiller tried to drop constraint %+v but it wasn't on the table descriptor, presumably due to a retry or rollback",
+						constraint,
+					)
+				}
+			case sqlbase.ConstraintToUpdate_FOREIGN_KEY:
+				idx, err := scTable.FindIndexByID(constraint.ForeignKeyIndex)
+				if err != nil {
+					return err
+				}
+				if idx.ForeignKey.IsSet() {
+					idx.ForeignKey = sqlbase.ForeignKeyReference{}
+					// Remove backreference from the referenced table (which could be the same table)
+					backrefTable, ok := descs[constraint.ForeignKey.Table]
+					if !ok {
+						return errors.AssertionFailedf("required table with ID %d not provided to update closure", sc.tableID)
+					}
+					if err := removeFKBackReferenceFromTable(
+						backrefTable, constraint.ForeignKey.Index, sc.tableID, constraint.ForeignKeyIndex,
+					); err != nil {
+						return err
+					}
+				} else {
+					if log.V(2) {
+						log.VEventf(
+							ctx, 2,
+							"backfiller tried to add constraint %+v but it wasn't on the table descriptor, presumably due to a retry or rollback",
+							constraint, idx.ForeignKey,
+						)
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	if _, err := sc.leaseMgr.PublishMultiple(ctx, tableIDsToUpdate, update, nil); err != nil {
+		return err
+	}
+	if err := sc.waitToUpdateLeases(ctx, sc.tableID); err != nil {
+		return err
+	}
+	for id := range fksByBackrefTable {
+		if err := sc.waitToUpdateLeases(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (sc *SchemaChanger) getTableVersion(
@@ -1252,7 +1348,7 @@ func runSchemaChangesInTxn(
 
 		case sqlbase.DescriptorMutation_DROP:
 			// Drop the name and drop the associated data later.
-			switch m.Descriptor_.(type) {
+			switch t := m.Descriptor_.(type) {
 			case *sqlbase.DescriptorMutation_Column:
 				if doneColumnBackfill {
 					break
@@ -1268,8 +1364,23 @@ func runSchemaChangesInTxn(
 				}
 
 			case *sqlbase.DescriptorMutation_Constraint:
-				return errors.AssertionFailedf(
-					"constraint validation mutation cannot be in the DROP state within the same transaction: %+v", m)
+				switch t.Constraint.ConstraintType {
+				case sqlbase.ConstraintToUpdate_CHECK, sqlbase.ConstraintToUpdate_NOT_NULL:
+					for i := range tableDesc.Checks {
+						if tableDesc.Checks[i].Name == t.Constraint.Name {
+							tableDesc.Checks = append(tableDesc.Checks[:i], tableDesc.Checks[i+1:]...)
+						}
+					}
+				case sqlbase.ConstraintToUpdate_FOREIGN_KEY:
+					idx, err := tableDesc.FindIndexByID(t.Constraint.ForeignKeyIndex)
+					if err != nil {
+						return err
+					}
+					idx.ForeignKey = t.Constraint.ForeignKey
+				default:
+					return errors.AssertionFailedf(
+						"unsupported constraint type: %d", errors.Safe(t.Constraint.ConstraintType))
+				}
 
 			default:
 				return errors.AssertionFailedf("unsupported mutation: %+v", m)
