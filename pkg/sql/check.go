@@ -116,7 +116,7 @@ func matchFullUnacceptableKeyQuery(
 		strings.Join(srcCols, ", "),             // 3
 		strings.Join(srcNotNullClause, " AND "), // 4
 		limit,                                   // 5
-	), srcCols, nil
+	), returnedCols, nil
 }
 
 // nonMatchingRowQuery generates and returns a query for rows that violate the
