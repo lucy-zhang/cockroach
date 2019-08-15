@@ -116,6 +116,34 @@ func readBackupDescriptor(
 	if err := protoutil.Unmarshal(descBytes, &backupDesc); err != nil {
 		return BackupDescriptor{}, err
 	}
+	// Make a map from table descriptor key to proto, so that the upgrade step
+	// below that tries to upgrade table descriptors with old foreign key
+	// representations can successfully find the other sides of the foreign key
+	// within the backup descriptor.
+	protoGetter := sqlbase.MapProtoGetter{
+		Protos: make(map[interface{}]protoutil.Message),
+	}
+	for i := range backupDesc.Descriptors {
+		table := backupDesc.Descriptors[i].GetTable()
+		if table == nil {
+			continue
+		}
+		protoGetter.Protos[string(sqlbase.MakeDescMetadataKey(table.ID))] =
+			sqlbase.WrapDescriptor(protoutil.Clone(table).(*sqlbase.TableDescriptor))
+	}
+	// We must always unconditionally upgrade the table descriptors with any
+	// descriptor upgrade magic that must happen, if there is an older version at
+	// play.
+	for i := range backupDesc.Descriptors {
+		table := backupDesc.Descriptors[i].GetTable()
+		if table == nil {
+			continue
+		}
+		_, err := table.MaybeUpgradeForeignKeyRepresentation(ctx, protoGetter)
+		if err != nil {
+			return backupDesc, err
+		}
+	}
 	return backupDesc, err
 }
 
@@ -301,6 +329,13 @@ func allSQLDescriptors(ctx context.Context, txn *client.Txn) ([]sqlbase.Descript
 		if err := row.ValueProto(&sqlDescs[i]); err != nil {
 			return nil, errors.NewAssertionErrorWithWrappedErrf(err,
 				"%s: unable to unmarshal SQL descriptor", row.Key)
+		}
+		if tableDesc := sqlDescs[i].GetTable(); tableDesc != nil {
+			// Upgrade all foreign keys as we read them from the cluster we're trying
+			// to make a backup of.
+			if _, err := tableDesc.MaybeUpgradeForeignKeyRepresentation(ctx, txn); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return sqlDescs, nil
@@ -539,11 +574,27 @@ func (r BackupFileDescriptors) Less(i, j int) bool {
 
 func writeBackupDescriptor(
 	ctx context.Context,
+	settings *cluster.Settings,
 	exportStore storageccl.ExportStorage,
 	filename string,
 	desc *BackupDescriptor,
 ) error {
 	sort.Sort(BackupFileDescriptors(desc.Files))
+
+	for i := range desc.Descriptors {
+		if tableDesc := desc.Descriptors[i].GetTable(); tableDesc != nil {
+			// When writing a backup descriptor, make sure to downgrade any new-style
+			// fks when we're in the 19.1/2 mixed state so that 19.1 clusters can
+			// still restore backups taken on a 19.1/2 mixed cluster.
+			downgraded, newDesc, err := tableDesc.MaybeDowngradeForeignKeyRepresentation(ctx, settings)
+			if err != nil {
+				return err
+			}
+			if downgraded {
+				desc.Descriptors[i] = *sqlbase.WrapDescriptor(newDesc)
+			}
+		}
+	}
 
 	descBuf, err := protoutil.Marshal(desc)
 	if err != nil {
@@ -784,9 +835,7 @@ func backup(
 				if checkpointFiles != nil {
 					checkpointMu.Lock()
 					backupDesc.Files = checkpointFiles
-					err := writeBackupDescriptor(
-						ctx, defaultStore, BackupDescriptorCheckpointName, backupDesc,
-					)
+					err := writeBackupDescriptor(ctx, settings, defaultStore, BackupDescriptorCheckpointName, backupDesc)
 					checkpointMu.Unlock()
 					if err != nil {
 						log.Errorf(ctx, "unable to checkpoint backup descriptor: %+v", err)
@@ -846,7 +895,7 @@ func backup(
 		}
 	}
 
-	if err := writeBackupDescriptor(ctx, defaultStore, BackupDescriptorName, backupDesc); err != nil {
+	if err := writeBackupDescriptor(ctx, settings, defaultStore, BackupDescriptorName, backupDesc); err != nil {
 		return mu.exported, err
 	}
 
@@ -876,7 +925,10 @@ func sanitizeLocalityKV(kv string) string {
 // clean up the written checkpoint file (BackupDescriptorCheckpointName) only
 // after writing to the backup file location (BackupDescriptorName).
 func VerifyUsableExportTarget(
-	ctx context.Context, exportStore storageccl.ExportStorage, readable string,
+	ctx context.Context,
+	settings *cluster.Settings,
+	exportStore storageccl.ExportStorage,
+	readable string,
 ) error {
 	if r, err := exportStore.ReadFile(ctx, BackupDescriptorName); err == nil {
 		// TODO(dt): If we audit exactly what not-exists error each ExportStorage
@@ -892,9 +944,8 @@ func VerifyUsableExportTarget(
 			"%s already contains a %s file (is another operation already in progress?)",
 			readable, BackupDescriptorCheckpointName)
 	}
-	if err := writeBackupDescriptor(
-		ctx, exportStore, BackupDescriptorCheckpointName, &BackupDescriptor{},
-	); err != nil {
+	if err := writeBackupDescriptor(ctx, settings, exportStore, BackupDescriptorCheckpointName,
+		&BackupDescriptor{}); err != nil {
 		return errors.Wrapf(err, "cannot write to %s", readable)
 	}
 	return nil
@@ -1171,7 +1222,7 @@ func backupPlanHook(
 
 		// TODO (lucy): For partitioned backups, also add verification for other
 		// stores we are writing to in addition to the default.
-		if err := VerifyUsableExportTarget(ctx, defaultStore, defaultURI); err != nil {
+		if err := VerifyUsableExportTarget(ctx, p.ExecCfg().Settings, defaultStore, defaultURI); err != nil {
 			return err
 		}
 

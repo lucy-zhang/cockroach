@@ -1227,7 +1227,17 @@ func restore(
 	// Get TableRekeys to use when importing raw data.
 	var rekeys []roachpb.ImportRequest_TableRekey
 	for i := range tables {
-		newDescBytes, err := protoutil.Marshal(sqlbase.WrapDescriptor(tables[i]))
+		// Downgrade all tables that we're writing to the cluster, if we're in a
+		// mixed 19.1/19.2 state.
+		downgraded, newDesc, err := tables[i].MaybeDowngradeForeignKeyRepresentation(restoreCtx, settings)
+		if err != nil {
+			return mu.res, nil, nil, errors.NewAssertionErrorWithWrappedErrf(err, "downgrading table %d", tables[i].ID)
+		}
+		tableToSerialize := tables[i]
+		if downgraded {
+			tableToSerialize = newDesc
+		}
+		newDescBytes, err := protoutil.Marshal(sqlbase.WrapDescriptor(tableToSerialize))
 		if err != nil {
 			return mu.res, nil, nil, errors.NewAssertionErrorWithWrappedErrf(err,
 				"marshaling descriptor")
