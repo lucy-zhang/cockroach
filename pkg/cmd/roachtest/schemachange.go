@@ -413,45 +413,53 @@ func makeMixedSchemaChanges(spec clusterSpec, warehouses int, length time.Durati
 				Warehouses: warehouses,
 				// We limit the number of workers because the default results in a lot
 				// of connections which can lead to OOM issues (see #40566).
-				Extra: fmt.Sprintf("--wait=false --tolerate-errors --workers=%d", warehouses),
+				Extra: fmt.Sprintf("--wait=false --tolerate-errors --workers=%d --fks=false", warehouses),
 				During: func(ctx context.Context) error {
-					if t.IsBuildVersion(`v19.2.0`) {
-						if err := runAndLogStmts(ctx, t, c, "mixed-schema-changes-19.2", []string{
-							// CREATE TABLE AS with a specified primary key was added in 19.2.
-							`CREATE TABLE tpcc.orderpks (o_w_id, o_d_id, o_id, PRIMARY KEY(o_w_id, o_d_id, o_id)) AS select o_w_id, o_d_id, o_id FROM tpcc.order;`,
-						}); err != nil {
-							return err
-						}
-					} else {
-						if err := runAndLogStmts(ctx, t, c, "mixed-schema-changes-19.1", []string{
-							`CREATE TABLE tpcc.orderpks (o_w_id, o_d_id, o_id, PRIMARY KEY(o_w_id, o_d_id, o_id));`,
-							// We can't populate the table with CREATE TABLE AS, so just
-							// insert the rows. AOST is used to reduce contention.
-							`INSERT INTO tpcc.orderpks SELECT o_w_id, o_d_id, o_id FROM tpcc.order AS OF SYSTEM TIME '-1s';`,
-						}); err != nil {
-							return err
-						}
+					// Sleep until the ramp period is complete.
+					time.Sleep(5 * time.Minute)
+
+					db := c.Conn(ctx, 1)
+					defer db.Close()
+
+					// The FK relationship that should hold is the following:
+					// alter table district add foreign key (d_w_id) references warehouse (w_id) not valid
+					query := `SELECT s.d_w_id, s.d_id FROM (SELECT d_w_id, d_id FROM tpcc.district@{IGNORE_FOREIGN_KEYS} WHERE d_w_id IS NOT NULL) AS s LEFT OUTER JOIN (SELECT * FROM tpcc.warehouse) AS t ON s.d_w_id = t.w_id WHERE t.w_id IS NULL`
+					type result struct {
+						dwid int
+						did  int
 					}
-					return runAndLogStmts(ctx, t, c, "mixed-schema-changes", []string{
-						`CREATE INDEX ON tpcc.order (o_carrier_id);`,
+					var results []result
 
-						`CREATE TABLE tpcc.customerpks (c_w_id INT, c_d_id INT, c_id INT, FOREIGN KEY (c_w_id, c_d_id, c_id) REFERENCES tpcc.customer (c_w_id, c_d_id, c_id));`,
+					c.l.Printf("running statement")
+					start := timeutil.Now()
+					rows, err := db.Query(query)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer rows.Close()
+					c.l.Printf("statement took %v", timeutil.Since(start))
 
-						`ALTER TABLE tpcc.order ADD COLUMN orderdiscount INT DEFAULT 0;`,
-						`ALTER TABLE tpcc.order ADD CONSTRAINT nodiscount CHECK (orderdiscount = 0);`,
+					for rows.Next() {
+						var r result
+						if err := rows.Scan(&r.dwid, &r.did); err != nil {
+							t.Fatal(err)
+						}
+						results = append(results, r)
+					}
 
-						`ALTER TABLE tpcc.orderpks ADD CONSTRAINT warehouse_id FOREIGN KEY (o_w_id) REFERENCES tpcc.warehouse (w_id);`,
-
-						// The FK constraint on tpcc.district referencing tpcc.warehouse is
-						// unvalidated, thus this operation will not be a noop.
-						`ALTER TABLE tpcc.district VALIDATE CONSTRAINT fk_d_w_id_ref_warehouse;`,
-
-						`ALTER TABLE tpcc.orderpks RENAME TO tpcc.readytodrop;`,
-						`TRUNCATE TABLE tpcc.readytodrop CASCADE;`,
-						`DROP TABLE tpcc.readytodrop CASCADE;`,
-					})
+					c.l.Printf("finished")
+					if len(results) == 0 {
+						c.l.Printf("success")
+						return nil
+					}
+					c.l.Printf("found %d violations", len(results))
+					for _, r := range results {
+						c.l.Printf("d_w_id=%d, d_id=%d", r.dwid, r.did)
+					}
+					t.Fatalf("violations found")
+					return errors.Errorf("should never get here")
 				},
-				Duration: length,
+				Duration: 5 * time.Minute,
 			})
 		},
 		MinVersion: "v19.1.0",
