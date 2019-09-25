@@ -424,12 +424,12 @@ func makeMixedSchemaChanges(spec clusterSpec, warehouses int, length time.Durati
 						}
 					}
 					return runAndLogStmts(ctx, t, c, "mixed-schema-changes", []string{
-						`CREATE INDEX ON tpcc.order (o_carrier_id);`,
+						// `CREATE INDEX ON tpcc.order (o_carrier_id);`,
 
-						`CREATE TABLE tpcc.customerpks (c_w_id INT, c_d_id INT, c_id INT, FOREIGN KEY (c_w_id, c_d_id, c_id) REFERENCES tpcc.customer (c_w_id, c_d_id, c_id));`,
+						// `CREATE TABLE tpcc.customerpks (c_w_id INT, c_d_id INT, c_id INT, FOREIGN KEY (c_w_id, c_d_id, c_id) REFERENCES tpcc.customer (c_w_id, c_d_id, c_id));`,
 
-						`ALTER TABLE tpcc.order ADD COLUMN orderdiscount INT DEFAULT 0;`,
-						`ALTER TABLE tpcc.order ADD CONSTRAINT nodiscount CHECK (orderdiscount = 0);`,
+						// `ALTER TABLE tpcc.order ADD COLUMN orderdiscount INT DEFAULT 0;`,
+						// `ALTER TABLE tpcc.order ADD CONSTRAINT nodiscount CHECK (orderdiscount = 0);`,
 
 						`ALTER TABLE tpcc.orderpks ADD CONSTRAINT warehouse_id FOREIGN KEY (o_w_id) REFERENCES tpcc.warehouse (w_id);`,
 
@@ -437,12 +437,12 @@ func makeMixedSchemaChanges(spec clusterSpec, warehouses int, length time.Durati
 						// unvalidated, thus this operation will not be a noop.
 						`ALTER TABLE tpcc.district VALIDATE CONSTRAINT fk_d_w_id_ref_warehouse;`,
 
-						`ALTER TABLE tpcc.orderpks RENAME TO tpcc.readytodrop;`,
-						`TRUNCATE TABLE tpcc.readytodrop CASCADE;`,
-						`DROP TABLE tpcc.readytodrop CASCADE;`,
+						// `ALTER TABLE tpcc.orderpks RENAME TO tpcc.readytodrop;`,
+						// `TRUNCATE TABLE tpcc.readytodrop CASCADE;`,
+						// `DROP TABLE tpcc.readytodrop CASCADE;`,
 					})
 				},
-				Duration: length,
+				Duration: 10 * time.Minute,
 			})
 		},
 		MinVersion: "v19.1.0",
