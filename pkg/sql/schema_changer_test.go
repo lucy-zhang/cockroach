@@ -5970,3 +5970,59 @@ CREATE UNIQUE INDEX i ON t.test(v);
 		runTest(params)
 	})
 }
+
+func TestWritesDuringFKValidationWithNewIndex(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	params, _ := tests.CreateTestServerParams()
+
+	constraintAddedNotification, updateDoneNotification := make(chan struct{}), make(chan struct{})
+
+	params.Knobs = base.TestingKnobs{
+		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
+			RunBeforeConstraintValidation: func() error {
+				close(constraintAddedNotification)
+				<-updateDoneNotification
+				return nil
+			},
+		},
+	}
+	s, sqlDB, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.TODO())
+	// Set up some FK constraints with CASCADE so that we fall back to the old FK
+	// check helper.
+	_, err := sqlDB.Exec(`
+CREATE DATABASE t;
+CREATE TABLE t.t1(a INT PRIMARY KEY);
+CREATE TABLE t.t2(b INT PRIMARY KEY REFERENCES t.t1 ON UPDATE CASCADE);
+CREATE TABLE t.t3(c INT);
+INSERT INTO t.t1 VALUES (1);
+INSERT INTO t.t2 VALUES (1);
+`)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		log.Infof(context.TODO(), "executing add fk")
+		_, err = sqlDB.Exec(
+			`ALTER TABLE t.t3 ADD FOREIGN KEY (c) REFERENCES t.t2 ON UPDATE CASCADE`,
+		)
+		log.Infof(context.TODO(), "done executing add fk, error %s", err)
+		// require.NoError(t, err)
+		wg.Done()
+	}()
+
+	log.Infof(context.TODO(), "waiting for constraint added")
+	<-constraintAddedNotification
+	log.Infof(context.TODO(), "constraint added")
+	_, err = sqlDB.Exec(`UPDATE t.t1 SET a = 2 WHERE a = 1`)
+	// require.NoError(t, err)
+	log.Infof(context.TODO(), "done, error: %s", err)
+	close(updateDoneNotification)
+	log.Infof(context.TODO(), "closing")
+
+	wg.Wait()
+
+	_, err = sqlDB.Exec(`UPDATE t.t1 SET a = 2 WHERE a = 1`)
+	require.NoError(t, err)
+}
