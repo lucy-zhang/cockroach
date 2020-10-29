@@ -767,45 +767,108 @@ func (tc *Collection) GetTableVersionByID(
 		return nil, sqlerrors.NewUndefinedRelationError(
 			&tree.TableRef{TableID: int64(tableID)})
 	}
-	hydrated, err := tc.hydrateTypesInTableDesc(ctx, txn, table)
-	if err != nil {
-		return nil, err
-	}
-	return hydrated.(*tabledesc.Immutable), nil
+	return table, nil
 }
 
+// TODO (lucy): Replace this with GetDescriptorByID.
 func (tc *Collection) getDescriptorVersionByID(
 	ctx context.Context, txn *kv.Txn, id descpb.ID, flags tree.CommonLookupFlags, setTxnDeadline bool,
 ) (catalog.Descriptor, error) {
-	if flags.AvoidCached || lease.TestingTableLeasesAreDisabled() {
-		desc, err := catalogkv.GetDescriptorByID(ctx, txn, tc.codec(), id, catalogkv.Immutable,
-			catalogkv.AnyDescriptorKind, true /* required */)
-		if err != nil {
-			return nil, err
-		}
-		if err := catalog.FilterDescriptorState(desc, flags); err != nil {
-			return nil, err
-		}
-		return desc, nil
+	desc, err := tc.GetDescriptorByID(ctx, id, txn, tree.CommonLookupFlags{
+		Required:       true,
+		IncludeOffline: flags.IncludeOffline,
+		IncludeDropped: flags.IncludeDropped,
+	}, false /* setTxnDeadline */)
+	if err != nil {
+		return nil, err
 	}
+	return desc, nil
+}
 
-	for _, ud := range tc.uncommittedDescriptors {
-		if immut := ud.immutable; immut.GetID() == id {
-			log.VEventf(ctx, 2, "found uncommitted descriptor %d", id)
-			if immut.Dropped() {
-				// TODO (lucy): This error is meant to be parallel to the error returned
-				// from FilterDescriptorState, but it may be too low-level for getting
-				// descriptors from the descriptor collection. In general the errors
-				// being returned from this method aren't that consistent.
-				return nil, catalog.NewInactiveDescriptorError(catalog.ErrDescriptorDropped)
+// GetMutableTableVersionByID is a variant of sqlbase.getTableDescFromID which returns a mutable
+// table descriptor of the table modified in the same transaction.
+func (tc *Collection) GetMutableTableVersionByID(
+	ctx context.Context, tableID descpb.ID, txn *kv.Txn,
+) (*tabledesc.Mutable, error) {
+	desc, err := tc.GetMutableDescriptorByID(ctx, tableID, txn)
+	if err != nil {
+		return nil, err
+	}
+	return desc.(*tabledesc.Mutable), nil
+}
+
+// GetMutableDescriptorByID returns a mutable implementation of the descriptor
+// with the requested id. An error is returned if no descriptor exists.
+// TODO (lucy): Replace this with GetDescriptorByID.
+func (tc *Collection) GetMutableDescriptorByID(
+	ctx context.Context, id descpb.ID, txn *kv.Txn,
+) (catalog.MutableDescriptor, error) {
+	desc, err := tc.GetDescriptorByID(ctx, id, txn, tree.CommonLookupFlags{
+		Required:       true,
+		RequireMutable: true,
+		AvoidCached:    true,
+		IncludeOffline: true,
+		IncludeDropped: true,
+	}, false /* setTxnDeadline */)
+	if err != nil {
+		return nil, err
+	}
+	return desc.(catalog.MutableDescriptor), nil
+}
+
+// GetDescriptorByID returns a descriptor with the requested ID using the
+// provided flags.
+//
+// Note that flags.Required is ignored and an error is always returned if no
+// such descriptor exists.
+func (tc *Collection) GetDescriptorByID(
+	ctx context.Context, id descpb.ID, txn *kv.Txn, flags tree.CommonLookupFlags, setTxnDeadline bool,
+) (desc catalog.Descriptor, err error) {
+	defer func() {
+		if err != nil {
+			return
+		}
+		// Filter dropped or offline descriptors as requested.
+		if filterErr := catalog.FilterDescriptorState(desc, flags); filterErr != nil {
+			desc, err = nil, filterErr
+		}
+		// If the descriptor is a table, hydrate it with type metadata.
+		if table, ok := desc.(catalog.TableDescriptor); ok {
+			hydrated, hydrateErr := tc.hydrateTypesInTableDesc(ctx, txn, table)
+			if err != nil {
+				desc, err = nil, hydrateErr
 			}
+			desc, err = hydrated, nil
+		}
+	}()
+
+	// First check the uncommitted descriptors.
+	if mut, immut := tc.getUncommittedDescriptorByID(id); mut != nil {
+		log.VEventf(ctx, 2, "found uncommitted descriptor %d", id)
+		if flags.RequireMutable {
+			return mut, nil
+		} else {
 			return immut, nil
 		}
 	}
 
-	// First, look to see if we already have the table in the shared cache.
+	// If AvoidCached is set or a mutable descriptor is requested, we read it
+	// directly from the store.
+	if flags.AvoidCached || flags.RequireMutable || lease.TestingTableLeasesAreDisabled() {
+		mutable := catalogkv.Mutability(flags.RequireMutable)
+		desc, err := catalogkv.GetDescriptorByID(ctx, txn, tc.codec(), id, mutable,
+			catalogkv.AnyDescriptorKind, true /* required */)
+		if err != nil {
+			return nil, err
+		}
+		log.VEventf(ctx, 2, "read descriptor %d from store", id)
+		return desc, nil
+	}
+
+	// Otherwise, get a leased descriptor.
+	// First, look to see if we already have the descriptor in the cache.
 	if desc := tc.leasedDescriptors.getByID(id); desc != nil {
-		log.VEventf(ctx, 2, "found descriptor %d in cache", id)
+		log.VEventf(ctx, 2, "found descriptor %d in leased descriptor cache", id)
 		return desc, nil
 	}
 
@@ -820,7 +883,7 @@ func (tc *Collection) getDescriptorVersionByID(
 	}
 
 	tc.leasedDescriptors.add(desc)
-	log.VEventf(ctx, 2, "added descriptor %q to collection", desc.GetName())
+	log.VEventf(ctx, 2, "added leased descriptor %d to collection", id)
 
 	if setTxnDeadline {
 		// If the descriptor we just acquired expires before the txn's deadline,
@@ -830,42 +893,6 @@ func (tc *Collection) getDescriptorVersionByID(
 		txn.UpdateDeadlineMaybe(ctx, expiration)
 	}
 	return desc, nil
-}
-
-// GetMutableTableVersionByID is a variant of sqlbase.getTableDescFromID which returns a mutable
-// table descriptor of the table modified in the same transaction.
-func (tc *Collection) GetMutableTableVersionByID(
-	ctx context.Context, tableID descpb.ID, txn *kv.Txn,
-) (*tabledesc.Mutable, error) {
-	desc, err := tc.GetMutableDescriptorByID(ctx, tableID, txn)
-	if err != nil {
-		return nil, err
-	}
-	table := desc.(*tabledesc.Mutable)
-	hydrated, err := tc.hydrateTypesInTableDesc(ctx, txn, table)
-	if err != nil {
-		return nil, err
-	}
-	return hydrated.(*tabledesc.Mutable), nil
-}
-
-// GetMutableDescriptorByID returns a mutable implementation of the descriptor
-// with the requested id. An error is returned if no descriptor exists.
-func (tc *Collection) GetMutableDescriptorByID(
-	ctx context.Context, id descpb.ID, txn *kv.Txn,
-) (catalog.MutableDescriptor, error) {
-	log.VEventf(ctx, 2, "planner getting mutable descriptor for id %d", id)
-
-	if desc := tc.getUncommittedDescriptorByID(id); desc != nil {
-		log.VEventf(ctx, 2, "found uncommitted descriptor %d", id)
-		return desc, nil
-	}
-	desc, err := catalogkv.GetDescriptorByID(ctx, txn, tc.codec(), id, catalogkv.Mutable,
-		catalogkv.AnyDescriptorKind, true /* required */)
-	if err != nil {
-		return nil, err
-	}
-	return desc.(catalog.MutableDescriptor), nil
 }
 
 // ResolveSchemaByID looks up a schema by ID.
@@ -1300,24 +1327,28 @@ func (tc *Collection) getUncommittedDescriptor(
 }
 
 // GetUncommittedTableByID returns an uncommitted table by its ID.
+// TODO (lucy): This method only exists to check whether a table is new and
+// avoid reading from the store, etc. if it's not. There should be better ways
+// to expose this.
 func (tc *Collection) GetUncommittedTableByID(id descpb.ID) *tabledesc.Mutable {
-	desc := tc.getUncommittedDescriptorByID(id)
-	if desc != nil {
-		if table, ok := desc.(*tabledesc.Mutable); ok {
+	if mut, _ := tc.getUncommittedDescriptorByID(id); mut != nil {
+		if table, ok := mut.(*tabledesc.Mutable); ok {
 			return table
 		}
 	}
 	return nil
 }
 
-func (tc *Collection) getUncommittedDescriptorByID(id descpb.ID) catalog.MutableDescriptor {
+func (tc *Collection) getUncommittedDescriptorByID(
+	id descpb.ID,
+) (mut catalog.MutableDescriptor, immut catalog.Descriptor) {
 	for i := range tc.uncommittedDescriptors {
 		desc := &tc.uncommittedDescriptors[i]
-		if desc.mutable.GetID() == id {
-			return desc.mutable
+		if desc.immutable.GetID() == id {
+			return desc.mutable, desc.immutable
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // GetAllDescriptors returns all descriptors visible by the transaction,
